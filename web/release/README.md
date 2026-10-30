@@ -7,7 +7,7 @@ The [windowed source protocol](WINDOWED-SOURCE.md) documents `attachSource()`, t
 ## Installation
 
 ```sh
-npm install @alexgorbatchev/signalsmith-stretch@1.3.3-dev.1
+npm install @alexgorbatchev/signalsmith-stretch@1.3.3-dev.2
 ```
 
 ```js

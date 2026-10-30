@@ -35,12 +35,20 @@ run(process.execPath, ['consumer.cjs']);
 const typeConsumer = `
 async function connect(context: AudioContext, port: MessagePort): Promise<SignalsmithStretch.IStretchNode> {
   const node = await SignalsmithStretch(context, {numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1]});
-  const description: SignalsmithStretch.ISourceDescription = {generation: 'track', sampleRate: context.sampleRate, channels: 1, lengthFrames: 480000, capacityFrames: 48000};
+  const description: SignalsmithStretch.ISourceDescription = {generation: 'track', sampleRate: context.sampleRate, channels: 1, lengthFrames: null, capacityFrames: 48000};
+  const finiteDescription: SignalsmithStretch.ISourceDescription = {...description, lengthFrames: 480000};
+  void finiteDescription;
   await node.attachSource(description, port, [port]);
   const command: SignalsmithStretch.ICommandMessage = {type: 'command', generation: description.generation, command: {id: 1, atFrame: 128, active: true, rate: 1.5, loop: {start: 100.25, end: 6100.25}}};
-  port.postMessage(command);
   const window: SignalsmithStretch.IWindowMessage = {type: 'window', generation: description.generation, start: 0, channels: [new Float32Array(12000)]};
   port.postMessage(window, window.channels.map(channel => channel.buffer));
+  port.postMessage(command);
+  const finalWindow: SignalsmithStretch.IWindowMessage = {type: 'window', generation: description.generation, start: 12000, channels: [new Float32Array(1000)], endFrame: 13000};
+  const finalMessage: SignalsmithStretch.WorkerMessage = finalWindow;
+  port.postMessage(finalMessage, finalWindow.channels.map(channel => channel.buffer));
+  const eof: SignalsmithStretch.IEofMessage = {type: 'eof', generation: description.generation, endFrame: 13000};
+  const eofMessage: SignalsmithStretch.WorkerMessage = eof;
+  port.postMessage(eofMessage);
   // @ts-expect-error generation identity is immutable
   description.generation = 'other';
   // @ts-expect-error command rate is numeric
@@ -60,8 +68,31 @@ function observe(message: SignalsmithStretch.WorkletMessage): number | null {
   if (message.type === 'need') return message.range.end;
   return null;
 }
+function observeBoundary(message: SignalsmithStretch.IObservation): boolean {
+  const length: number | null = message.lengthFrames;
+  const ended: boolean = message.ended;
+  void length;
+  return ended;
+}
+function observeEof(message: SignalsmithStretch.IEofAcceptedMessage): number {
+  const response: SignalsmithStretch.WorkletMessage = message;
+  return response.lengthFrames;
+}
+function observeWindow(message: SignalsmithStretch.IAcceptedMessage): number | null {
+  return message.lengthFrames;
+}
+function observeApplied(message: SignalsmithStretch.IAppliedMessage): boolean {
+  return observeBoundary(message);
+}
+function observeState(message: SignalsmithStretch.IStateMessage): boolean {
+  return observeBoundary(message);
+}
 void connect;
 void observe;
+void observeEof;
+void observeWindow;
+void observeApplied;
+void observeState;
 `;
 writeFileSync(join(directory, 'consumer.mts'), "import SignalsmithStretch from '@alexgorbatchev/signalsmith-stretch';\n" + typeConsumer);
 writeFileSync(join(directory, 'consumer.cts'), "import SignalsmithStretch = require('@alexgorbatchev/signalsmith-stretch');\n" + typeConsumer);

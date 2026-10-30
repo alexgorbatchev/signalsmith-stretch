@@ -6,6 +6,36 @@ import {test} from 'node:test';
 const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource;');
 const spec = {generation: 'track-1', sampleRate: 48000, channels: 1, lengthFrames: 48000 * 3600 * 12, capacityFrames: 32};
 
+test('unknown end remains missing until an atomic final PCM window establishes exact EOF', () => {
+	const source = createSource({...spec, lengthFrames: null});
+	source.add('track-1', 0, [Float32Array.from([1, 2])]);
+	assert.deepEqual(source.read(2, [new Float32Array(2)]), {start: 2, end: 6});
+	assert.equal(source.lengthFrames, null);
+	assert.throws(() => source.add('track-1', 2, [Float32Array.from([3, 4])], 3), /EOF/);
+	assert.equal(source.residentFrames, 2);
+	assert.equal(source.lengthFrames, null);
+	source.add('track-1', 2, [Float32Array.from([3, 4])], 4);
+	const output = [new Float32Array(4)];
+	assert.equal(source.read(2, output), null);
+	assert.deepEqual(Array.from(output[0]), [3, 4, 0, 0]);
+	assert.equal(source.lengthFrames, 4);
+	assert.equal(source.description.lengthFrames, null);
+});
+
+test('authoritative EOF rejects stale or conflicting evidence and retains proof across eviction', () => {
+	const source = createSource({...spec, lengthFrames: null});
+	source.add('track-1', 100, [Float32Array.from([1, 2])]);
+	source.drop('track-1', [100]);
+	assert.equal(source.provenFrames, 102);
+	assert.throws(() => source.finish('old-track', 102), /Stale/);
+	assert.throws(() => source.finish('track-1', 101), /EOF/);
+	assert.equal(source.lengthFrames, null);
+	source.finish('track-1', 102);
+	source.finish('track-1', 102);
+	assert.throws(() => source.finish('track-1', 103), /EOF/);
+	assert.equal(source.lengthFrames, 102);
+});
+
 test('a twelve-hour source retains only explicitly admitted PCM and returns ownership on release', () => {
 	const source = createSource(spec);
 	const first = Float32Array.from({length: 16}, (_, i) => i);

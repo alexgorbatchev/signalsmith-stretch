@@ -339,3 +339,93 @@ test('native port transfers retain bounded PCM ownership and reject stale genera
 		assert.equal(h.transport.source.residentFrames, 12000);
 	} finally { h.close(); }
 });
+
+
+test("unknown-end commands require decoded endpoint evidence, retained after release", async () => {
+ const h = await openHarness({...spec, lengthFrames: null});
+ try {
+  await assert.rejects(h.send("command", {command:{id:1,atFrame:0,position:100}}, "queued"), /invalid_command/);
+  await assert.rejects(h.send("command", {command:{id:1,atFrame:0,loop:{start:0,end:100}}}, "queued"), /invalid_command/);
+  await h.send("window", {start:96,channels:[sine(4)]}, "window-accepted");
+  await h.send("drop", {starts:[96]}, "released");
+  await h.send("command", {command:{id:1,atFrame:0,position:99.5,loop:{start:.5,end:99.5}}}, "queued");
+  await assert.rejects(h.send("eof", {generation:"old",endFrame:100}, "eof-accepted"), /stale_generation/);
+  await assert.rejects(h.send("eof", {endFrame:99}, "eof-accepted"), /invalid_eof/);
+  await h.send("eof", {endFrame:100}, "eof-accepted");
+  await assert.rejects(h.send("eof", {endFrame:101}, "eof-accepted"), /invalid_eof/);
+  assert.equal(h.transport.source.lengthFrames,100);
+  assert.equal(h.transport.source.residentFrames,0);
+ } finally { h.close(); }
+});
+
+for (const rate of [.5,1,1.5,2]) test("atomic learned EOF preserves native DSP history and exact fractional end at rate " + rate, async () => {
+ const unknown = await openHarness({...spec,lengthFrames:null});
+ const known = await openHarness({...spec,lengthFrames:12000});
+ try {
+  for (const h of [known,unknown]) {
+   await h.send("window",{start:0,channels:[sine(10000)]},"window-accepted");
+   await h.send("command",{command:{id:1,atFrame:0,position:4000.25,rate,active:true}},"queued");
+  }
+  const captured=[];
+  for(let block=0;block<170;block++) {
+   if(block===8) {
+    await known.send("window",{start:10000,channels:[sine(2000,440,10000)]},"window-accepted");
+    await unknown.send("window",{start:10000,channels:[sine(2000,440,10000)],endFrame:12000},"window-accepted");
+   }
+   const a=known.render()[0], b=unknown.render()[0];
+   assert.deepEqual(b,a,"learned EOF changed actual native PCM at block "+block);
+   captured.push(...b);
+  }
+  const end=unknown.wasm._outputLatency()+Math.ceil((12000-4000.25)/rate);
+  assert.ok(energy(captured.slice(end-64,end))>.01);
+  assert.equal(energy(captured.slice(end)),0);
+  await unknown.flush();
+  const observation=unknown.messages.findLast(m=>m.type==="state");
+  assert.equal(observation.lengthFrames,12000);
+  assert.equal(observation.ended,true);
+  assert.equal(observation.nextSourceFrame,12000);
+ } finally { known.close(); unknown.close(); }
+});
+
+test('learning EOF preserves delayed rate segments near natural end', async () => {
+	const unknown = await openHarness({...spec, lengthFrames: null});
+	const known = await openHarness({...spec, lengthFrames: 12000});
+	try {
+		for (const h of [known, unknown]) {
+			await h.send('window', {start: 0, channels: [sine(12000)]}, 'window-accepted');
+			await h.send('command', {command: {id: 1, atFrame: 0, position: 4003, active: true}}, 'queued');
+		}
+		const captured = [];
+		for (let block = 0; block < 110; ++block) {
+			if (block === 40) await unknown.send('eof', {endFrame: 12000}, 'eof-accepted');
+			if (block === 80) {
+				for (const h of [known, unknown]) {
+					await h.send('command', {command: {id: 2, atFrame: h.frame, rate: .5}}, 'queued');
+				}
+			}
+			const expected = known.render()[0];
+			const actual = unknown.render()[0];
+			assert.deepEqual(actual, expected);
+			captured.push(...actual);
+		}
+		const end = unknown.wasm._outputLatency() + 7997;
+		assert.ok(energy(captured.slice(end - 64, end)) > .05);
+		assert.equal(energy(captured.slice(end)), 0);
+	} finally { known.close(); unknown.close(); }
+});
+
+test('an authoritative empty EOF ends without claiming audible source frames', async () => {
+	const h = await openHarness({...spec, lengthFrames: null});
+	try {
+		await h.send('command', {command: {id: 1, atFrame: 0, active: true}}, 'queued');
+		await h.send('eof', {endFrame: 0}, 'eof-accepted');
+		const applied = h.wait(message => message.type === 'applied');
+		assert.equal(energy(h.render()[0]), 0);
+		const observation = await applied;
+		assert.equal(observation.ended, true);
+		assert.equal(observation.lengthFrames, 0);
+		assert.equal(observation.sourceFrame, null);
+		assert.equal(observation.effectiveOutputFrame, null);
+		assert.equal(h.messages.some(message => message.type === 'need'), false);
+	} finally { h.close(); }
+});
