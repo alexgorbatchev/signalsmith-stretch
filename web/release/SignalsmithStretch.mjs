@@ -18,7 +18,355 @@ if (typeof exports === 'object' && typeof module === 'object')
   module.exports = SignalsmithStretch;
 else if (typeof define === 'function' && define['amd'])
   define([], () => SignalsmithStretch);
-function registerWorkletProcessor(Module, audioNodeKey) {
+// Included in both release formats and serialized into the AudioWorklet module.
+function createWindowedSource(spec) {
+	const integer = value => Number.isSafeInteger(value) && value >= 0;
+	if (!spec || typeof spec.generation !== 'string' || !spec.generation.length
+		|| !integer(spec.lengthFrames) || !spec.lengthFrames
+		|| !integer(spec.capacityFrames) || !spec.capacityFrames
+		|| !Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > 32
+		|| !Number.isFinite(spec.sampleRate) || spec.sampleRate <= 0) {
+		throw new RangeError('Invalid source specification');
+	}
+	const description = Object.freeze({...spec});
+	let windows = [], residentFrames = 0;
+	const wrap = (frame, loop) => loop
+		? loop.start + ((frame - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
+		: frame;
+	const find = frame => {
+		let low = 0, high = windows.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (windows[middle].start <= frame) low = middle + 1;
+			else high = middle;
+		}
+		const window = windows[low - 1];
+		return window && frame < window.end ? window : null;
+	};
+	return {
+		description,
+		starts() { return windows.map(window => window.start); },
+		get residentFrames() { return residentFrames; },
+		ranges(start, length, loop = null) {
+			if (loop && length >= loop.end - loop.start) return [{start: Math.floor(loop.start), end: Math.ceil(loop.end)}];
+			start = wrap(start, loop);
+			const end = Math.min(start + length, loop ? loop.end : description.lengthFrames);
+			const ranges = [{start: Math.max(0, Math.floor(start)), end: Math.max(0, Math.ceil(end))}];
+			if (loop && start + length > loop.end) ranges.push({start: Math.floor(loop.start), end: Math.ceil(loop.start + start + length - loop.end)});
+			return ranges.filter(range => range.end > range.start);
+		},
+		missing(start, length, loop = null) {
+			// Prefetch only a bounded contiguous range. The worker may round it to
+			// its decode page size; no request spans a large loop's head and tail.
+			if (loop && length >= loop.end - loop.start) {
+				start = loop.start;
+				length = loop.end - loop.start;
+			}
+			let remaining = length;
+			while (remaining > 0) {
+				const position = wrap(start, loop);
+				const frame = Math.floor(position);
+				const boundary = Math.min(description.lengthFrames, loop ? loop.end : description.lengthFrames);
+				if (position < 0) {
+					const count = Math.min(remaining, -position);
+					remaining -= count;
+					start += count;
+					continue;
+				}
+				if (frame >= description.lengthFrames) return null;
+				const window = find(frame);
+				if (!window) {
+					const next = windows.find(candidate => candidate.start > frame);
+					// The horizon decides whether to request a page, not its size.
+					// A tiny advancing horizon otherwise creates one PCM window per
+					// quantum. Never extend through an already owned window.
+					return {start: frame, end: Math.min(Math.ceil(boundary),
+						next ? next.start : description.lengthFrames, frame + Math.max(1, Math.floor(description.capacityFrames / 2)))};
+				}
+				const count = Math.min(remaining, window.end - position, boundary - position);
+				remaining -= count;
+				start += count;
+			}
+			return null;
+		},
+		add(generation, start, channels) {
+			if (generation !== description.generation) throw new RangeError('Stale source generation');
+			if (!integer(start) || !Array.isArray(channels) || channels.length !== description.channels
+				|| !channels.every(channel => channel instanceof Float32Array && channel.length === channels[0].length
+					&& channel.buffer instanceof ArrayBuffer && channel.byteOffset === 0 && channel.byteLength === channel.buffer.byteLength)
+				|| !channels[0].length || start + channels[0].length > description.lengthFrames) {
+				throw new RangeError('Invalid PCM window');
+			}
+			const length = channels[0].length, end = start + length;
+			if (windows.length >= 256 || residentFrames + length > description.capacityFrames) {
+				throw new RangeError('PCM capacity exceeded');
+			}
+			if (windows.some(window => start < window.end && end > window.start)) {
+				throw new RangeError('Overlapping PCM window');
+			}
+			if (!channels.every(channel => channel.every(Number.isFinite))) throw new RangeError('Non-finite PCM');
+			windows.push({start, end, channels});
+			windows.sort((a, b) => a.start - b.start);
+			residentFrames += length;
+			return {generation, start, end, residentFrames};
+		},
+		drop(generation, starts) {
+			if (generation !== description.generation) throw new RangeError('Stale source generation');
+			if (!Array.isArray(starts) || !starts.every(integer)) throw new RangeError('Invalid window release');
+			const transfer = [];
+			windows = windows.filter(window => {
+				if (!starts.includes(window.start)) return true;
+				residentFrames -= window.end - window.start;
+				window.channels.forEach(channel => transfer.push(channel.buffer));
+				return false;
+			});
+			return {value: {generation, residentFrames}, transfer: [...new Set(transfer)]};
+		},
+		read(start, output, loop = null) {
+			if (!Number.isFinite(start) || output.length !== description.channels
+				|| !output.every(channel => channel instanceof Float32Array && channel.length === output[0].length)
+				|| (loop && (!Number.isFinite(loop.start) || !Number.isFinite(loop.end)
+					|| loop.start < 0 || loop.end > description.lengthFrames || loop.end <= loop.start))) {
+				throw new RangeError('Invalid analysis range');
+			}
+			let missingStart = null;
+			for (let index = 0; index < output[0].length; ++index) {
+				const position = wrap(start + index, loop);
+				const first = Math.floor(position), fraction = position - first;
+				const second = Math.floor(wrap(first + 1, loop));
+				const left = first >= 0 && first < description.lengthFrames ? find(first) : null;
+				const right = fraction && second >= 0 && second < description.lengthFrames ? find(second) : null;
+				if ((!left && first >= 0 && first < description.lengthFrames)
+					|| (fraction && !right && second >= 0 && second < description.lengthFrames)) {
+					if (missingStart === null) missingStart = !left && first >= 0 && first < description.lengthFrames ? first : second;
+				}
+				for (let channel = 0; channel < output.length; ++channel) {
+					const a = left ? left.channels[channel][first - left.start] : 0;
+					const b = right ? right.channels[channel][second - right.start] : 0;
+					output[channel][index] = a + fraction * (b - a);
+				}
+			}
+			if (missingStart !== null) {
+				output.forEach(channel => channel.fill(0));
+				const next = windows.find(window => window.start > missingStart);
+				return {start: missingStart, end: Math.min(missingStart + output[0].length + 2,
+					next ? next.start : description.lengthFrames, description.lengthFrames)};
+			}
+			return null;
+		}
+	};
+}
+// Buffer transport for one immutable source generation. All methods run in the
+// AudioWorklet; the supplied MessagePort belongs to the source-fetching worker.
+function createWindowedTransport(createSource, spec, port) {
+	const source = createSource(spec);
+	spec = source.description;
+	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
+	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
+	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
+	const wrap = (position, loop) => loop
+		? loop.start + ((position - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
+		: position;
+	const outputPosition = frame => {
+		while (outputTimeline.length > 1 && outputTimeline[1].frame <= frame) outputTimeline.shift();
+		const segment = outputTimeline[0];
+		return segment && segment.frame <= frame
+			? wrap(segment.position + (frame - segment.frame) * segment.rate, segment.loop) : null;
+	};
+	const present = (frame, length, validFrom) => {
+		let validTo = length;
+		let cursor = frame + validFrom;
+		const end = frame + length;
+		while (cursor < end) {
+			const current = outputPosition(cursor);
+			const segment = outputTimeline[0];
+			const until = Math.min(end, outputTimeline[1]?.frame ?? end);
+			if (!segment.loop && current + (until - cursor) * segment.rate >= spec.lengthFrames) {
+				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (spec.lengthFrames - current) / segment.rate));
+				presentedPosition = spec.lengthFrames;
+				break;
+			}
+			cursor = until;
+			presentedPosition = outputPosition(cursor);
+		}
+		return validTo;
+	};
+	const send = (type, data, transfer = []) => port.postMessage({type, generation: spec.generation, ...data}, transfer);
+	const reject = (message, code) => send('rejected', {requestId: message.requestId, code});
+	const checkedCommand = message => {
+		const command = message.command;
+		if (!command || !Number.isSafeInteger(command.id) || command.id <= lastCommandId
+			|| !Number.isSafeInteger(command.atFrame) || command.atFrame < 0 || commands.length >= 64) {
+			throw new RangeError('Invalid command identity or schedule');
+		}
+		const next = {...(commands.at(-1)?.state || state), ...command};
+		if (!Number.isFinite(next.position) || (Object.hasOwn(command, "position") && (next.position < 0 || next.position > spec.lengthFrames))
+			|| !Number.isFinite(next.rate) || next.rate <= 0 || next.rate > 4
+			|| !Number.isFinite(next.semitones) || Math.abs(next.semitones) > 48
+			|| typeof next.active !== 'boolean'
+			|| (next.loop !== null && (!Number.isFinite(next.loop?.start) || !Number.isFinite(next.loop?.end)
+				|| next.loop.start < 0 || next.loop.end > spec.lengthFrames || next.loop.end <= next.loop.start))
+			|| (commands.length && command.atFrame < commands.at(-1).atFrame)) {
+			throw new RangeError('Invalid transport state');
+		}
+		lastCommandId = command.id;
+		commands.push({id: command.id, atFrame: command.atFrame, requestId: message.requestId, state: next,
+			seek: Object.hasOwn(command, 'position')});
+		send('queued', {requestId: message.requestId, commandId: command.id});
+	};
+	port.onmessage = event => {
+		const message = event.data;
+		if (closed || !message || message.generation !== spec.generation) {
+			if (!closed) reject(message || {}, 'stale_generation');
+			return;
+		}
+		try {
+			if (message.type === 'window') {
+				const receipt = source.add(message.generation, message.start, message.channels);
+				needKey = '';
+				send('window-accepted', {requestId: message.requestId, ...receipt});
+			} else if (message.type === 'drop') {
+				const released = source.drop(message.generation, message.starts);
+				send('released', {requestId: message.requestId, ...released.value, buffers: released.transfer}, released.transfer);
+			} else if (message.type === 'command') {
+				checkedCommand(message);
+			} else if (message.type === 'read-failed') {
+				sourceFailed = true;
+				needKey = '';
+				send('read-failed', {requestId: message.requestId, code: 'source_read_failed'});
+			} else if (message.type === 'retry') {
+				sourceFailed = false;
+				needKey = '';
+				send('retry-accepted', {requestId: message.requestId});
+			} else {
+				reject(message, 'unknown_message');
+			}
+		} catch (error) {
+			reject(message, 'invalid_' + message.type);
+		}
+	};
+	port.start();
+	send('source-ready', {description: source.description});
+	return {
+		source,
+		close(reason = 'detached') {
+			closed = true;
+			drain = null;
+			outputTimeline = [];
+			commands.forEach(command => reject(command, 'source_closed'));
+			commands = [];
+			const released = source.drop(spec.generation, source.starts());
+			send('source-closed', {reason, buffers: released.transfer}, released.transfer);
+			port.close();
+		},
+		render(frame, output, input, wasm, inputLatency, outputLatency) {
+			if (closed) return;
+			const applied = [];
+			while (commands.length && commands[0].atFrame <= frame) {
+				const command = commands.shift();
+				const position = command.seek ? command.state.position
+					: !command.state.active ? presentedPosition : state.position;
+				state = {...command.state, position};
+				if (command.seek || !state.active) {
+					wasm._reset();
+					outputTimeline = [];
+					drain = null;
+					presentedPosition = position;
+				}
+				applied.push(command);
+			}
+			const loop = state.loop;
+			const position = wrap(state.position, loop);
+			const active = state.active && (loop || presentedPosition < spec.lengthFrames);
+			const missing = active && !drain ? source.read(position + inputLatency - input[0].length, input, loop) : null;
+			let nextStatus = !active ? 'paused' : missing ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
+			let validFrom = output[0].length;
+			let validTo = output[0].length;
+			let sourceFrame = null;
+			let outputRate = null;
+			let samples = null, processed = false;
+			// An interrupted preparation has no valid native tail yet: flushing
+			// it would label unprimed zeros as source progress. Only drain DSP
+			// history after this generation has reached audible output.
+			if (missing && !drain && outputTimeline.length && status === 'playing') {
+				// Flush once: the native flush resets DSP history after exporting its tail.
+				wasm._flush(outputLatency);
+				const memory = wasm.exports ? wasm.exports.memory.buffer : wasm.HEAP8.buffer;
+				const base = input[0].byteOffset + input[0].length * spec.channels * 4;
+				drain = {offset: 0, channels: Array.from({length: spec.channels}, (_, channel) =>
+					new Float32Array(new Float32Array(memory, base + input[0].length * channel * 4, outputLatency)))};
+			}
+			if (active && drain) {
+				const count = Math.min(output[0].length, outputLatency - drain.offset);
+				samples = output;
+				output.forEach((channel, index) => {
+					channel.fill(0);
+					channel.set(drain.channels[index].subarray(drain.offset, drain.offset + count));
+				});
+				validFrom = Math.max(0, Math.min(count, outputTimeline[0].frame - frame));
+				sourceFrame = validFrom < count ? outputPosition(frame + validFrom) : null;
+				outputRate = sourceFrame === null ? null : outputTimeline[0].rate;
+				validTo = present(frame, count, validFrom);
+				nextStatus = "draining";
+				drain.offset += count;
+				if (drain.offset === outputLatency) {
+					drain = null;
+					outputTimeline = [];
+					state.position = presentedPosition;
+				}
+			} else if (!active || missing) {
+				output.forEach(channel => channel.fill(0));
+				if (status === 'playing' || status === 'preparing') wasm._reset();
+				state.position = presentedPosition;
+				outputTimeline = [];
+			} else {
+				wasm._setTransposeSemitones(state.semitones, 8000 / spec.sampleRate);
+				wasm._seek(input[0].length, state.rate);
+				wasm._process(0, output[0].length);
+				processed = true;
+				outputTimeline.push({frame: frame + outputLatency, position, rate: state.rate, loop});
+				validFrom = Math.max(0, Math.min(output[0].length, outputTimeline[0].frame - frame));
+				sourceFrame = validFrom < output[0].length ? outputPosition(frame + validFrom) : null;
+				outputRate = sourceFrame === null ? null : outputTimeline[0].rate;
+				if (validFrom < output[0].length) {
+					nextStatus = 'playing';
+					validTo = present(frame, output[0].length, validFrom);
+				}
+				state.position = position + output[0].length * state.rate;
+			}
+			// Leave room for a complete incoming page as well as mandatory
+			// analysis history. Filling the entire remaining horizon causes
+			// distant speculative pages to repeatedly evict imminent input.
+			const needed = missing || (active ? source.missing(position + inputLatency,
+				Math.max(1, Math.min(spec.sampleRate, Math.floor((spec.capacityFrames - input[0].length - 2) / 2))), loop) : null);
+			if (needed && !sourceFailed) {
+				const key = needed.start + ':' + needed.end;
+				if (!needKey) {
+					needKey = key;
+					send('need', {range: needed, renderFrame: frame, processingSourceFrame: position,
+						required: Boolean(missing), retain: source.ranges(position + inputLatency - input[0].length, input[0].length + 1, loop)});
+				}
+			}
+			const observation = {renderFrame: frame, validFrom, validTo, sourceFrame, nextSourceFrame: presentedPosition,
+				processingSourceFrame: position,
+				acceptedRate: state.rate, acceptedSemitones: state.semitones, acceptedLoop: loop,
+				outputRate,
+				active: state.active, status: nextStatus,
+				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
+			applied.forEach((command, index) => send('applied', {requestId: command.requestId, commandId: command.id,
+				superseded: index < applied.length - 1,
+				effectiveOutputFrame: index < applied.length - 1 ? null
+					: !command.state.active ? frame : processed ? frame + outputLatency : null, ...observation}));
+			if (nextStatus !== status || applied.length || frame - lastObservation >= spec.sampleRate / 10) {
+				send('state', observation);
+				lastObservation = frame;
+			}
+			status = nextStatus;
+			return samples || (active && !missing) ? {validFrom, validTo, observation, samples} : null;
+		}
+	};
+}
+function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport) {
 	class WasmProcessor extends AudioWorkletProcessor {
 		constructor(options) {
 			super(options);
@@ -31,6 +379,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			this.audioBuffers = []; // list of (multi-channel) audio buffers
 			this.audioBuffersStart = 0; // time-stamp for the first audio buffer
 			this.audioBuffersEnd = 0; // just to be helpful
+			this.windowedTransport = null;
 			
 			this.timeIntervalSamples = sampleRate*0.1;
 			this.timeIntervalCounter = 0;
@@ -50,7 +399,24 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			}];
 			
 			let remoteMethods = {
+				attachSource: (spec, port) => {
+					if (spec.sampleRate !== sampleRate || spec.channels !== this.channels || !(port instanceof MessagePort)
+						|| spec.capacityFrames < this.bufferLength + 2) {
+						throw new RangeError('Source must match the worklet rate and channels and supply a MessagePort');
+					}
+					const transport = createTransport(createSource, spec, port);
+					this.windowedTransport?.close();
+					this.windowedTransport = transport;
+					this.wasmModule._reset();
+					return transport.source.description;
+				},
+				detachSource: () => {
+					this.windowedTransport?.close();
+					this.windowedTransport = null;
+					this.wasmModule._reset();
+				},
 				configure: config => {
+					if (this.windowedTransport) throw Object.assign(new Error("Detach the source before configuring DSP"), {name: "InvalidStateError"});
 					Object.assign(this.config, config);
 					this.configure();
 				},
@@ -180,11 +546,15 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let data = event.data;
 					let messageId = data.shift();
 					let method = data.shift();
-					let result = remoteMethods[method](...data);
-					if (result?.transfer) {
-						this.port.postMessage([messageId, result.value], result.transfer);
-					} else {
+					try {
+						let result = remoteMethods[method](...data);
+						if (result?.transfer) {
+							this.port.postMessage([messageId, result.value], result.transfer);
+						} else {
 						this.port.postMessage([messageId, result]);
+						}
+					} catch (error) {
+						this.port.postMessage([messageId, null, {name: error.name, message: error.message}]);
 					}
 				};
 				let methodArgCounts = {};
@@ -256,17 +626,38 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 
 			// Check the input/output channel counts
 			if (outputList[0].length != this.channels) {
+				if (this.windowedTransport) {
+					this.windowedTransport.close("output_channels_changed");
+					this.windowedTransport = null;
+					this.channels = outputList[0].length;
+					this.configure();
+					outputList[0].forEach(channel => channel.fill(0));
+					return true;
+				}
 				this.channels = outputList[0]?.length || 0;
-				configure();
+				this.configure();
 			}
 			let outputBlockSize = outputList[0][0].length;
 
 			let memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
 			// Buffer list (one per channel)
 			let inputs = inputList[0];
+			if (this.windowedTransport) {
+				const input = this.buffersIn.map(pointer => new Float32Array(memory, pointer, this.bufferLength));
+				const rendered = this.windowedTransport.render(currentFrame, outputList[0], input, wasmModule,
+					wasmModule._inputLatency(), wasmModule._outputLatency());
+				if (rendered) {
+					memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
+					outputList[0].forEach((channel, c) => {
+						channel.set(rendered.samples ? rendered.samples[c] : new Float32Array(memory, this.buffersOut[c], outputBlockSize));
+						channel.fill(0, 0, rendered.validFrom);
+						channel.fill(0, rendered.validTo);
+					});
+				}
+				return true;
+			}
 			if (!currentMapSegment.active) {
 				outputList[0].forEach((_, c) => {
-					let channelBuffer = inputs[c%inputs.length];
 					let buffer = new Float32Array(memory, this.buffersIn[c], outputBlockSize);
 					buffer.fill(0);
 				});
@@ -366,7 +757,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 SignalsmithStretch = ((Module, audioNodeKey) => {
 	if (typeof AudioWorkletProcessor === "function" && typeof registerProcessor === "function") {
 		// AudioWorklet side
-		registerWorkletProcessor(Module, audioNodeKey);
+		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport);
 		return {};
 	}
 	let promiseKey = Symbol();
@@ -389,7 +780,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			if (!audioContext[promiseKey]) {
 				let moduleUrl = createNode.moduleUrl;
 				if (!moduleUrl) {
-					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)})`;
+					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport})`;
 					moduleUrl = URL.createObjectURL(new Blob([moduleCode], {type: 'text/javascript'}));
 				}
 				audioContext[promiseKey] = audioContext.audioWorklet.addModule(moduleUrl);
@@ -404,8 +795,8 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 		let timeUpdateCallback = null;
 		let post = (transfer, ...data) => {
 			let id = idCounter++;
-			return new Promise(resolve => {
-				requestMap[id] = resolve;
+			return new Promise((resolve, reject) => {
+				requestMap[id] = {resolve, reject};
 				audioNode.port.postMessage([id].concat(data), transfer);
 			});
 		};
@@ -418,13 +809,15 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 				if (timeUpdateCallback) timeUpdateCallback(value);
 			}
 			if (id in requestMap) {
-				requestMap[id](value);
+				const pending = requestMap[id];
+				if (data[2]) pending.reject(Object.assign(new Error(data[2].message), {name: data[2].name}));
+				else pending.resolve(value);
 				delete requestMap[id];
 			}
 		};
 		
 		return new Promise(resolve => {
-			requestMap['ready'] = remoteMethodKeys => {
+			requestMap['ready'] = {resolve: remoteMethodKeys => {
 				Object.keys(remoteMethodKeys).forEach(key => {
 					let argCount = remoteMethodKeys[key];
 					audioNode[key] = (...args) => {
@@ -443,7 +836,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 					return post(null, 'setUpdateInterval', seconds);
 				}
 				resolve(audioNode);
-			}
+			}};
 		});
 	};
 	return createNode;

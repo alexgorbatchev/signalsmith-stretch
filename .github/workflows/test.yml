@@ -1,0 +1,23 @@
+name: Native wrapper and package checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:package
+      - run: git diff --exit-code -- web/release

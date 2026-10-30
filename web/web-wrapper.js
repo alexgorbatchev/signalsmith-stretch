@@ -1,4 +1,4 @@
-function registerWorkletProcessor(Module, audioNodeKey) {
+function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport) {
 	class WasmProcessor extends AudioWorkletProcessor {
 		constructor(options) {
 			super(options);
@@ -11,6 +11,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			this.audioBuffers = []; // list of (multi-channel) audio buffers
 			this.audioBuffersStart = 0; // time-stamp for the first audio buffer
 			this.audioBuffersEnd = 0; // just to be helpful
+			this.windowedTransport = null;
 			
 			this.timeIntervalSamples = sampleRate*0.1;
 			this.timeIntervalCounter = 0;
@@ -30,7 +31,24 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 			}];
 			
 			let remoteMethods = {
+				attachSource: (spec, port) => {
+					if (spec.sampleRate !== sampleRate || spec.channels !== this.channels || !(port instanceof MessagePort)
+						|| spec.capacityFrames < this.bufferLength + 2) {
+						throw new RangeError('Source must match the worklet rate and channels and supply a MessagePort');
+					}
+					const transport = createTransport(createSource, spec, port);
+					this.windowedTransport?.close();
+					this.windowedTransport = transport;
+					this.wasmModule._reset();
+					return transport.source.description;
+				},
+				detachSource: () => {
+					this.windowedTransport?.close();
+					this.windowedTransport = null;
+					this.wasmModule._reset();
+				},
 				configure: config => {
+					if (this.windowedTransport) throw Object.assign(new Error("Detach the source before configuring DSP"), {name: "InvalidStateError"});
 					Object.assign(this.config, config);
 					this.configure();
 				},
@@ -160,11 +178,15 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 					let data = event.data;
 					let messageId = data.shift();
 					let method = data.shift();
-					let result = remoteMethods[method](...data);
-					if (result?.transfer) {
-						this.port.postMessage([messageId, result.value], result.transfer);
-					} else {
+					try {
+						let result = remoteMethods[method](...data);
+						if (result?.transfer) {
+							this.port.postMessage([messageId, result.value], result.transfer);
+						} else {
 						this.port.postMessage([messageId, result]);
+						}
+					} catch (error) {
+						this.port.postMessage([messageId, null, {name: error.name, message: error.message}]);
 					}
 				};
 				let methodArgCounts = {};
@@ -236,17 +258,38 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 
 			// Check the input/output channel counts
 			if (outputList[0].length != this.channels) {
+				if (this.windowedTransport) {
+					this.windowedTransport.close("output_channels_changed");
+					this.windowedTransport = null;
+					this.channels = outputList[0].length;
+					this.configure();
+					outputList[0].forEach(channel => channel.fill(0));
+					return true;
+				}
 				this.channels = outputList[0]?.length || 0;
-				configure();
+				this.configure();
 			}
 			let outputBlockSize = outputList[0][0].length;
 
 			let memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
 			// Buffer list (one per channel)
 			let inputs = inputList[0];
+			if (this.windowedTransport) {
+				const input = this.buffersIn.map(pointer => new Float32Array(memory, pointer, this.bufferLength));
+				const rendered = this.windowedTransport.render(currentFrame, outputList[0], input, wasmModule,
+					wasmModule._inputLatency(), wasmModule._outputLatency());
+				if (rendered) {
+					memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
+					outputList[0].forEach((channel, c) => {
+						channel.set(rendered.samples ? rendered.samples[c] : new Float32Array(memory, this.buffersOut[c], outputBlockSize));
+						channel.fill(0, 0, rendered.validFrom);
+						channel.fill(0, rendered.validTo);
+					});
+				}
+				return true;
+			}
 			if (!currentMapSegment.active) {
 				outputList[0].forEach((_, c) => {
-					let channelBuffer = inputs[c%inputs.length];
 					let buffer = new Float32Array(memory, this.buffersIn[c], outputBlockSize);
 					buffer.fill(0);
 				});
@@ -346,7 +389,7 @@ function registerWorkletProcessor(Module, audioNodeKey) {
 SignalsmithStretch = ((Module, audioNodeKey) => {
 	if (typeof AudioWorkletProcessor === "function" && typeof registerProcessor === "function") {
 		// AudioWorklet side
-		registerWorkletProcessor(Module, audioNodeKey);
+		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport);
 		return {};
 	}
 	let promiseKey = Symbol();
@@ -369,7 +412,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			if (!audioContext[promiseKey]) {
 				let moduleUrl = createNode.moduleUrl;
 				if (!moduleUrl) {
-					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)})`;
+					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport})`;
 					moduleUrl = URL.createObjectURL(new Blob([moduleCode], {type: 'text/javascript'}));
 				}
 				audioContext[promiseKey] = audioContext.audioWorklet.addModule(moduleUrl);
@@ -384,8 +427,8 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 		let timeUpdateCallback = null;
 		let post = (transfer, ...data) => {
 			let id = idCounter++;
-			return new Promise(resolve => {
-				requestMap[id] = resolve;
+			return new Promise((resolve, reject) => {
+				requestMap[id] = {resolve, reject};
 				audioNode.port.postMessage([id].concat(data), transfer);
 			});
 		};
@@ -398,13 +441,15 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 				if (timeUpdateCallback) timeUpdateCallback(value);
 			}
 			if (id in requestMap) {
-				requestMap[id](value);
+				const pending = requestMap[id];
+				if (data[2]) pending.reject(Object.assign(new Error(data[2].message), {name: data[2].name}));
+				else pending.resolve(value);
 				delete requestMap[id];
 			}
 		};
 		
 		return new Promise(resolve => {
-			requestMap['ready'] = remoteMethodKeys => {
+			requestMap['ready'] = {resolve: remoteMethodKeys => {
 				Object.keys(remoteMethodKeys).forEach(key => {
 					let argCount = remoteMethodKeys[key];
 					audioNode[key] = (...args) => {
@@ -423,7 +468,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 					return post(null, 'setUpdateInterval', seconds);
 				}
 				resolve(audioNode);
-			}
+			}};
 		});
 	};
 	return createNode;

@@ -1,19 +1,29 @@
 {
-	"name": "signalsmith-stretch",
-	"version": "1.3.2",
+	"name": "@alexgorbatchev/signalsmith-stretch",
+	"version": "1.3.3-dev.1",
 	"description": "JS/WASM release of the Signalsmith Stretch library",
-	"main": "SignalsmithStretch.mjs",
+	"main": "./SignalsmithStretch.cjs",
+	"types": "./SignalsmithStretch.d.mts",
 	"exports": {
-		"import": "./SignalsmithStretch.mjs",
-		"require": "./SignalsmithStretch.js"
+		".": {
+			"import": {
+				"types": "./SignalsmithStretch.d.mts",
+				"default": "./SignalsmithStretch.mjs"
+			},
+			"require": {
+				"types": "./SignalsmithStretch.d.cts",
+				"default": "./SignalsmithStretch.cjs"
+			}
+		},
+		"./SignalsmithStretch.js": "./SignalsmithStretch.js"
 	},
 	"type": "module",
-	"scripts": {
-		"test": "echo \"Error: no test specified\" && exit 1"
-	},
+	"files": ["SignalsmithStretch.js", "SignalsmithStretch.mjs", "SignalsmithStretch.cjs", "SignalsmithStretch.d.mts", "SignalsmithStretch.d.cts", "LICENSE.txt", "UPSTREAM.md", "WINDOWED-SOURCE.md"],
+	"publishConfig": {"access": "public", "registry": "https://registry.npmjs.org"},
 	"repository": {
 		"type": "git",
-		"url": "https://signalsmith-audio.co.uk/code/stretch.git"
+		"url": "git+https://github.com/alexgorbatchev/signalsmith-stretch.git",
+		"directory": "web/release"
 	},
 	"keywords": [
 		"audio",

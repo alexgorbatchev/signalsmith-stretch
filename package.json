@@ -1,0 +1,13 @@
+{
+  "name": "signalsmith-stretch-development",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "make -C web -o emscripten/main.js",
+    "test": "make -C web test",
+    "test:package": "node scripts/testPackage.mjs"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

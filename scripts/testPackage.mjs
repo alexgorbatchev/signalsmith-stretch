@@ -1,0 +1,81 @@
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {mkdirSync, mkdtempSync, readFileSync, writeFileSync} from 'node:fs';
+import {join, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const temporaryRoot = join(root, '.tmp');
+mkdirSync(temporaryRoot, {recursive: true});
+const directory = mkdtempSync(join(temporaryRoot, 'package-consumer-'));
+const run = (command, args, cwd = directory) => execFileSync(command, args, {
+  cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']
+});
+const packed = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], join(root, 'web/release')))[0];
+const archive = join(directory, packed.filename);
+writeFileSync(join(directory, 'package.json'), JSON.stringify({private: true, type: 'module'}));
+run('npm', ['install', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund',
+  '--registry=https://registry.npmjs.org', archive]);
+
+// The public factory must reach worklet installation, rather than returning an
+// ESM namespace or requiring a browser global merely to load the package.
+const invokeCheck = `
+assert.equal(typeof factory, 'function');
+assert.equal(factory.moduleUrl, undefined);
+factory.moduleUrl = 'https://example.org/worklet.js';
+assert.equal(factory.moduleUrl, 'https://example.org/worklet.js');
+await assert.rejects(factory({audioWorklet: {addModule() { throw new Error('worklet installation reached'); }}}), {message: 'worklet installation reached'});
+`;
+writeFileSync(join(directory, 'consumer.mjs'), "import assert from 'node:assert/strict';\nimport factory from '@alexgorbatchev/signalsmith-stretch';\n" + invokeCheck);
+writeFileSync(join(directory, 'consumer.cjs'), "const assert = require('node:assert/strict');\nconst factory = require('@alexgorbatchev/signalsmith-stretch');\n(async () => {\n" + invokeCheck + "\n})().catch(error => { console.error(error); process.exitCode = 1; });\n");
+run(process.execPath, ['consumer.mjs']);
+run(process.execPath, ['consumer.cjs']);
+
+const typeConsumer = `
+async function connect(context: AudioContext, port: MessagePort): Promise<SignalsmithStretch.IStretchNode> {
+  const node = await SignalsmithStretch(context, {numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1]});
+  const description: SignalsmithStretch.ISourceDescription = {generation: 'track', sampleRate: context.sampleRate, channels: 1, lengthFrames: 480000, capacityFrames: 48000};
+  await node.attachSource(description, port, [port]);
+  const command: SignalsmithStretch.ICommandMessage = {type: 'command', generation: description.generation, command: {id: 1, atFrame: 128, active: true, rate: 1.5, loop: {start: 100.25, end: 6100.25}}};
+  port.postMessage(command);
+  const window: SignalsmithStretch.IWindowMessage = {type: 'window', generation: description.generation, start: 0, channels: [new Float32Array(12000)]};
+  port.postMessage(window, window.channels.map(channel => channel.buffer));
+  // @ts-expect-error generation identity is immutable
+  description.generation = 'other';
+  // @ts-expect-error command rate is numeric
+  command.command.rate = 'fast';
+  await node.detachSource();
+  await node.configure({preset: 'cheaper'});
+  const scheduled: SignalsmithStretch.IScheduledState = await node.start({active: true, rate: 1.5, semitones: 0});
+  scheduled.output.toFixed();
+  await node.stop();
+  await node.addBuffers([new Float32Array(128)]);
+  await node.dropBuffers();
+  return node;
+}
+function observe(message: SignalsmithStretch.WorkletMessage): number | null {
+  if (message.type === 'applied') return message.effectiveOutputFrame;
+  if (message.type === 'state') return message.sourceFrame;
+  if (message.type === 'need') return message.range.end;
+  return null;
+}
+void connect;
+void observe;
+`;
+writeFileSync(join(directory, 'consumer.mts'), "import SignalsmithStretch from '@alexgorbatchev/signalsmith-stretch';\n" + typeConsumer);
+writeFileSync(join(directory, 'consumer.cts'), "import SignalsmithStretch = require('@alexgorbatchev/signalsmith-stretch');\n" + typeConsumer);
+writeFileSync(join(directory, 'tsconfig.json'), JSON.stringify({compilerOptions: {
+  noEmit: true, strict: true, module: 'NodeNext', target: 'ES2022', lib: ['ES2022', 'DOM'], skipLibCheck: false
+}, files: ['consumer.mts', 'consumer.cts']}));
+run(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'), '--project', join(directory, 'tsconfig.json')]);
+
+const installed = join(directory, 'node_modules/@alexgorbatchev/signalsmith-stretch');
+assert.equal(readFileSync(join(installed, 'LICENSE.txt'), 'utf8'), readFileSync(join(root, 'LICENSE.txt'), 'utf8'));
+assert.equal(readFileSync(join(installed, 'UPSTREAM.md'), 'utf8'), readFileSync(join(root, 'UPSTREAM.md'), 'utf8'));
+const receipt = {node: process.version, typescript: run(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--version']).trim(),
+  package: packed.name, version: packed.version, archiveSHA256: createHash('sha256').update(readFileSync(archive)).digest('hex'),
+  archiveIntegrity: packed.integrity, files: packed.files.map(file => file.path), runtime: ['ESM callable factory', 'CommonJS callable factory'],
+  declarations: ['NodeNext .mts consumer', 'NodeNext .cts consumer'], licenseAndProvenance: true};
+writeFileSync(join(directory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
+console.log(JSON.stringify({directory, ...receipt}, null, 2));
