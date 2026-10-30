@@ -23,7 +23,14 @@ export async function openHarness(spec) {
 			else waits.push(wait);
 		}
 	});
-	const transport = createTransport(createSource, spec, port1);
+	let transport;
+	try {
+		transport = createTransport(createSource, spec, port1);
+	} catch (error) {
+		port1.close();
+		port2.close();
+		throw error;
+	}
 	let request = 0, frame = 0, lastRender = null;
 	const wait = match => new Promise(resolve => waits.push({match, resolve}));
 	return {

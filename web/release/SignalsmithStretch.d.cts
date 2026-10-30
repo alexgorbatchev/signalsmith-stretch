@@ -10,7 +10,7 @@ declare namespace SignalsmithStretch {
     readonly generation: string;
     readonly sampleRate: number;
     readonly channels: number;
-    readonly lengthFrames: number;
+    readonly lengthFrames: number | null;
     readonly capacityFrames: number;
   }
 
@@ -87,6 +87,12 @@ declare namespace SignalsmithStretch {
     type: "window";
     start: number;
     channels: Float32Array<ArrayBuffer>[];
+    endFrame?: number;
+  }
+
+  interface IEofMessage extends IMessageIdentity {
+    type: "eof";
+    endFrame: number;
   }
 
   interface IDropMessage extends IMessageIdentity {
@@ -107,7 +113,7 @@ declare namespace SignalsmithStretch {
     type: "retry";
   }
 
-  type WorkerMessage = IWindowMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage;
+  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage;
 
   interface IObservation {
     renderFrame: number;
@@ -121,6 +127,8 @@ declare namespace SignalsmithStretch {
     acceptedLoop: ILoop | null;
     outputRate: number | null;
     active: boolean;
+    lengthFrames: number | null;
+    ended: boolean;
     status: "paused" | "preparing" | "playing" | "draining" | "underrun" | "source-error";
     inputLatencyFrames: number;
     outputLatencyFrames: number;
@@ -154,6 +162,12 @@ declare namespace SignalsmithStretch {
   interface IAcceptedMessage extends IMessageIdentity, ISourceRange {
     type: "window-accepted";
     residentFrames: number;
+    lengthFrames: number | null;
+  }
+
+  interface IEofAcceptedMessage extends IMessageIdentity {
+    type: "eof-accepted";
+    lengthFrames: number;
   }
 
   interface IReleasedMessage extends IMessageIdentity {
@@ -188,6 +202,7 @@ declare namespace SignalsmithStretch {
   }
 
   type WorkletMessage = IStateMessage | IAppliedMessage | INeedMessage | IReadyMessage | IAcceptedMessage
-    | IReleasedMessage | IClosedMessage | IQueuedMessage | IRejectedMessage | IFailureMessage | IRetriedMessage;
+    | IEofAcceptedMessage | IReleasedMessage | IClosedMessage | IQueuedMessage | IRejectedMessage | IFailureMessage
+    | IRetriedMessage;
 }
 export = SignalsmithStretch;

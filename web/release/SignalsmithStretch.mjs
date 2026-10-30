@@ -22,14 +22,21 @@ else if (typeof define === 'function' && define['amd'])
 function createWindowedSource(spec) {
 	const integer = value => Number.isSafeInteger(value) && value >= 0;
 	if (!spec || typeof spec.generation !== 'string' || !spec.generation.length
-		|| !integer(spec.lengthFrames) || !spec.lengthFrames
+		|| (spec.lengthFrames !== null && (!integer(spec.lengthFrames) || !spec.lengthFrames))
 		|| !integer(spec.capacityFrames) || !spec.capacityFrames
 		|| !Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > 32
 		|| !Number.isFinite(spec.sampleRate) || spec.sampleRate <= 0) {
 		throw new RangeError('Invalid source specification');
 	}
 	const description = Object.freeze({...spec});
-	let windows = [], residentFrames = 0;
+	let windows = [], residentFrames = 0, lengthFrames = spec.lengthFrames, provenFrames = 0;
+	const checkedEnd = (generation, endFrame, minimum = provenFrames) => {
+		if (generation !== description.generation) throw new RangeError("Stale source generation");
+		if (!integer(endFrame) || endFrame < minimum || (lengthFrames !== null && endFrame !== lengthFrames)) {
+			throw new RangeError("Conflicting source EOF");
+		}
+	};
+	const within = frame => frame >= 0 && (lengthFrames === null || frame < lengthFrames);
 	const wrap = (frame, loop) => loop
 		? loop.start + ((frame - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
 		: frame;
@@ -47,10 +54,17 @@ function createWindowedSource(spec) {
 		description,
 		starts() { return windows.map(window => window.start); },
 		get residentFrames() { return residentFrames; },
+		get lengthFrames() { return lengthFrames; },
+		get provenFrames() { return provenFrames; },
+		finish(generation, endFrame) {
+			checkedEnd(generation, endFrame);
+			lengthFrames = endFrame;
+			return {lengthFrames};
+		},
 		ranges(start, length, loop = null) {
 			if (loop && length >= loop.end - loop.start) return [{start: Math.floor(loop.start), end: Math.ceil(loop.end)}];
 			start = wrap(start, loop);
-			const end = Math.min(start + length, loop ? loop.end : description.lengthFrames);
+			const end = Math.min(start + length, loop ? loop.end : lengthFrames ?? start + length);
 			const ranges = [{start: Math.max(0, Math.floor(start)), end: Math.max(0, Math.ceil(end))}];
 			if (loop && start + length > loop.end) ranges.push({start: Math.floor(loop.start), end: Math.ceil(loop.start + start + length - loop.end)});
 			return ranges.filter(range => range.end > range.start);
@@ -66,14 +80,14 @@ function createWindowedSource(spec) {
 			while (remaining > 0) {
 				const position = wrap(start, loop);
 				const frame = Math.floor(position);
-				const boundary = Math.min(description.lengthFrames, loop ? loop.end : description.lengthFrames);
+				const boundary = loop ? loop.end : lengthFrames ?? position + Math.max(1, Math.floor(description.capacityFrames / 2));
 				if (position < 0) {
 					const count = Math.min(remaining, -position);
 					remaining -= count;
 					start += count;
 					continue;
 				}
-				if (frame >= description.lengthFrames) return null;
+				if (lengthFrames !== null && frame >= lengthFrames) return null;
 				const window = find(frame);
 				if (!window) {
 					const next = windows.find(candidate => candidate.start > frame);
@@ -81,7 +95,7 @@ function createWindowedSource(spec) {
 					// A tiny advancing horizon otherwise creates one PCM window per
 					// quantum. Never extend through an already owned window.
 					return {start: frame, end: Math.min(Math.ceil(boundary),
-						next ? next.start : description.lengthFrames, frame + Math.max(1, Math.floor(description.capacityFrames / 2)))};
+						next ? next.start : boundary, frame + Math.max(1, Math.floor(description.capacityFrames / 2)))};
 				}
 				const count = Math.min(remaining, window.end - position, boundary - position);
 				remaining -= count;
@@ -89,15 +103,20 @@ function createWindowedSource(spec) {
 			}
 			return null;
 		},
-		add(generation, start, channels) {
+		add(generation, start, channels, endFrame) {
 			if (generation !== description.generation) throw new RangeError('Stale source generation');
 			if (!integer(start) || !Array.isArray(channels) || channels.length !== description.channels
 				|| !channels.every(channel => channel instanceof Float32Array && channel.length === channels[0].length
 					&& channel.buffer instanceof ArrayBuffer && channel.byteOffset === 0 && channel.byteLength === channel.buffer.byteLength)
-				|| !channels[0].length || start + channels[0].length > description.lengthFrames) {
+				|| !channels[0].length || !integer(start + channels[0].length)
+				|| (lengthFrames !== null && start + channels[0].length > lengthFrames)) {
 				throw new RangeError('Invalid PCM window');
 			}
 			const length = channels[0].length, end = start + length;
+			if (endFrame !== undefined) {
+				checkedEnd(generation, endFrame, Math.max(provenFrames, end));
+				if (endFrame !== end) throw new RangeError("Final PCM window must end at EOF");
+			}
 			if (windows.length >= 256 || residentFrames + length > description.capacityFrames) {
 				throw new RangeError('PCM capacity exceeded');
 			}
@@ -108,6 +127,8 @@ function createWindowedSource(spec) {
 			windows.push({start, end, channels});
 			windows.sort((a, b) => a.start - b.start);
 			residentFrames += length;
+			provenFrames = Math.max(provenFrames, end);
+			if (endFrame !== undefined) lengthFrames = endFrame;
 			return {generation, start, end, residentFrames};
 		},
 		drop(generation, starts) {
@@ -126,7 +147,7 @@ function createWindowedSource(spec) {
 			if (!Number.isFinite(start) || output.length !== description.channels
 				|| !output.every(channel => channel instanceof Float32Array && channel.length === output[0].length)
 				|| (loop && (!Number.isFinite(loop.start) || !Number.isFinite(loop.end)
-					|| loop.start < 0 || loop.end > description.lengthFrames || loop.end <= loop.start))) {
+					|| loop.start < 0 || Math.ceil(loop.end) > (lengthFrames ?? provenFrames) || loop.end <= loop.start))) {
 				throw new RangeError('Invalid analysis range');
 			}
 			let missingStart = null;
@@ -134,11 +155,11 @@ function createWindowedSource(spec) {
 				const position = wrap(start + index, loop);
 				const first = Math.floor(position), fraction = position - first;
 				const second = Math.floor(wrap(first + 1, loop));
-				const left = first >= 0 && first < description.lengthFrames ? find(first) : null;
-				const right = fraction && second >= 0 && second < description.lengthFrames ? find(second) : null;
-				if ((!left && first >= 0 && first < description.lengthFrames)
-					|| (fraction && !right && second >= 0 && second < description.lengthFrames)) {
-					if (missingStart === null) missingStart = !left && first >= 0 && first < description.lengthFrames ? first : second;
+				const left = within(first) ? find(first) : null;
+				const right = fraction && within(second) ? find(second) : null;
+				if ((!left && within(first))
+					|| (fraction && !right && within(second))) {
+					if (missingStart === null) missingStart = !left && within(first) ? first : second;
 				}
 				for (let channel = 0; channel < output.length; ++channel) {
 					const a = left ? left.channels[channel][first - left.start] : 0;
@@ -150,7 +171,7 @@ function createWindowedSource(spec) {
 				output.forEach(channel => channel.fill(0));
 				const next = windows.find(window => window.start > missingStart);
 				return {start: missingStart, end: Math.min(missingStart + output[0].length + 2,
-					next ? next.start : description.lengthFrames, description.lengthFrames)};
+					next ? next.start : missingStart + output[0].length + 2, lengthFrames ?? missingStart + output[0].length + 2)};
 			}
 			return null;
 		}
@@ -181,9 +202,9 @@ function createWindowedTransport(createSource, spec, port) {
 			const current = outputPosition(cursor);
 			const segment = outputTimeline[0];
 			const until = Math.min(end, outputTimeline[1]?.frame ?? end);
-			if (!segment.loop && current + (until - cursor) * segment.rate >= spec.lengthFrames) {
-				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (spec.lengthFrames - current) / segment.rate));
-				presentedPosition = spec.lengthFrames;
+			if (!segment.loop && source.lengthFrames !== null && current + (until - cursor) * segment.rate >= source.lengthFrames) {
+				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (source.lengthFrames - current) / segment.rate));
+				presentedPosition = source.lengthFrames;
 				break;
 			}
 			cursor = until;
@@ -200,12 +221,13 @@ function createWindowedTransport(createSource, spec, port) {
 			throw new RangeError('Invalid command identity or schedule');
 		}
 		const next = {...(commands.at(-1)?.state || state), ...command};
-		if (!Number.isFinite(next.position) || (Object.hasOwn(command, "position") && (next.position < 0 || next.position > spec.lengthFrames))
+		const limit = source.lengthFrames ?? source.provenFrames;
+		if (!Number.isFinite(next.position) || (Object.hasOwn(command, "position") && (next.position < 0 || Math.ceil(next.position) > limit))
 			|| !Number.isFinite(next.rate) || next.rate <= 0 || next.rate > 4
 			|| !Number.isFinite(next.semitones) || Math.abs(next.semitones) > 48
 			|| typeof next.active !== 'boolean'
 			|| (next.loop !== null && (!Number.isFinite(next.loop?.start) || !Number.isFinite(next.loop?.end)
-				|| next.loop.start < 0 || next.loop.end > spec.lengthFrames || next.loop.end <= next.loop.start))
+				|| next.loop.start < 0 || Math.ceil(next.loop.end) > limit || next.loop.end <= next.loop.start))
 			|| (commands.length && command.atFrame < commands.at(-1).atFrame)) {
 			throw new RangeError('Invalid transport state');
 		}
@@ -222,9 +244,13 @@ function createWindowedTransport(createSource, spec, port) {
 		}
 		try {
 			if (message.type === 'window') {
-				const receipt = source.add(message.generation, message.start, message.channels);
+				const receipt = source.add(message.generation, message.start, message.channels, message.endFrame);
 				needKey = '';
-				send('window-accepted', {requestId: message.requestId, ...receipt});
+				send('window-accepted', {requestId: message.requestId, ...receipt, lengthFrames: source.lengthFrames});
+			} else if (message.type === 'eof') {
+				const receipt = source.finish(message.generation, message.endFrame);
+				needKey = '';
+				send('eof-accepted', {requestId: message.requestId, ...receipt});
 			} else if (message.type === 'drop') {
 				const released = source.drop(message.generation, message.starts);
 				send('released', {requestId: message.requestId, ...released.value, buffers: released.transfer}, released.transfer);
@@ -277,7 +303,7 @@ function createWindowedTransport(createSource, spec, port) {
 			}
 			const loop = state.loop;
 			const position = wrap(state.position, loop);
-			const active = state.active && (loop || presentedPosition < spec.lengthFrames);
+			const active = state.active && (loop || source.lengthFrames === null || presentedPosition < source.lengthFrames);
 			const missing = active && !drain ? source.read(position + inputLatency - input[0].length, input, loop) : null;
 			let nextStatus = !active ? 'paused' : missing ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
 			let validFrom = output[0].length;
@@ -351,7 +377,8 @@ function createWindowedTransport(createSource, spec, port) {
 				processingSourceFrame: position,
 				acceptedRate: state.rate, acceptedSemitones: state.semitones, acceptedLoop: loop,
 				outputRate,
-				active: state.active, status: nextStatus,
+				active: state.active, status: nextStatus, lengthFrames: source.lengthFrames,
+				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
 			applied.forEach((command, index) => send('applied', {requestId: command.requestId, commandId: command.id,
 				superseded: index < applied.length - 1,

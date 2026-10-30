@@ -22,12 +22,21 @@ The configured WASM analysis/output buffers are additional bounded DSP storage.
 During starvation, a single pending output tail additionally holds at most
 `outputLatencyFrames * channels * 4` bytes until drained.
 
+Each generation represents a finite, immutable decoded media source, not an
+appendable live stream. `lengthFrames` is either its exact positive integer PCM
+length or `null` when the source owner has not established that length. The
+initial specification remains immutable. Learned EOF is separate generation
+state; observations and acceptance messages expose the effective `lengthFrames`.
+Do not substitute an estimated duration, timestamp-derived approximation, or
+sentinel length for an unknown end.
+
 The supplied `MessagePort` connects directly to a source-fetching worker. Its
 messages carry the source's `generation` and a caller-owned `requestId`.
 
 | Worker message | Fields | Worklet response |
 | --- | --- | --- |
-| `window` | `start`, planar `channels: Float32Array[]` | `window-accepted` with owned range and residency |
+| `window` | `start`, planar `channels: Float32Array[]`, optional `endFrame` | `window-accepted` with owned range, residency and effective `lengthFrames` |
+| `eof` | exact exclusive `endFrame` | `eof-accepted` with exact `lengthFrames` |
 | `drop` | `starts: number[]` | `released` with transferred buffers |
 | `command` | `command` | `queued`, then `applied` at a render quantum |
 | `read-failed` | none | `read-failed` with `source_read_failed` |
@@ -39,6 +48,35 @@ generations and capacity overflow are rejected. Release windows before replacing
 their ranges. Returned buffers can be reused by the worker. Decoded data,
 in-flight transfers and the worker's own fetch/decode buffers require a separate
 worker-side budget.
+
+The source owner establishes authoritative EOF. Send `endFrame` atomically with
+the final nonempty PCM window; it must equal that window's exclusive end. Use
+`eof` when no final PCM accompanies the observation, including an empty source
+with `endFrame: 0`. EOF must be a nonnegative safe integer at least as large as
+every accepted PCM window's end, including windows since released. Repeating the
+same EOF is accepted; a conflicting EOF or stale generation is rejected. All
+final-window PCM and EOF validation completes before either is admitted. Learning
+EOF does not reset DSP history or discard delayed output.
+
+Until EOF is known, absent samples at nonnegative source positions are missing
+input, never end padding. Only an exact known end permits zero padding after
+that end. An unknown source retains a scalar decoded-frame proof equal to the
+greatest accepted window end, independent of eviction. Explicit seeks require
+`ceil(position)` no greater than that proof; loops require `ceil(loop.end)` no
+greater than it. Prime an endpoint window before submitting a distant seek or
+loop. This proves the endpoint without retaining the entire intervening source.
+Once EOF is known, these bounds use the exact length instead. Endpoint evidence
+does not promise residency: missing loop interiors still require worker reads.
+
+EOF also retires the outstanding need, and later requests are bounded by the
+learned end. A speculative request may extend beyond that end; the worker must
+retire its corresponding in-flight work and must not submit out-of-range PCM.
+If a real underrun precedes EOF delivery, the normal drain/recovery rules apply.
+The protocol does not establish decoder sample indexing: the source owner must
+prove that each window's `start` and EOF share one exact absolute PCM lattice.
+An empty random-seek response or `seek start + returned samples` is not sufficient
+without that proof. The wrapper neither decodes files nor guarantees a decoder's
+format, timestamp, resampling or priming behavior.
 
 The worklet emits `need` with a bounded `range`, the current analysis `retain`
 ranges and `required`. At most one request remains outstanding until a window
@@ -98,6 +136,12 @@ wrap inside the accepted loop, including analysis pre/post-roll across either
 boundary and multiple wraps per quantum. Natural end clips against each delayed
 output segment's own rate and loop, rather than current processing settings, and
 masks output after the source boundary.
+`lengthFrames` remains `null` until exact EOF is known. `ended` is true when the
+accepted active, nonlooped source position is at that known boundary. This includes
+natural output completion, an explicit seek to the end and an empty source; it
+does not prove that audio was emitted. Natural completion retains the `paused`
+status value; `ended` distinguishes it from a user pause. An empty source emits no
+valid source frame.
 
 Output frames refer to the AudioContext render stream, not the physical device.
 Device-clock mapping belongs to the consumer's `AudioContext.getOutputTimestamp()`

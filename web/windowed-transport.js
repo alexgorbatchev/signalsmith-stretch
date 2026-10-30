@@ -23,9 +23,9 @@ function createWindowedTransport(createSource, spec, port) {
 			const current = outputPosition(cursor);
 			const segment = outputTimeline[0];
 			const until = Math.min(end, outputTimeline[1]?.frame ?? end);
-			if (!segment.loop && current + (until - cursor) * segment.rate >= spec.lengthFrames) {
-				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (spec.lengthFrames - current) / segment.rate));
-				presentedPosition = spec.lengthFrames;
+			if (!segment.loop && source.lengthFrames !== null && current + (until - cursor) * segment.rate >= source.lengthFrames) {
+				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (source.lengthFrames - current) / segment.rate));
+				presentedPosition = source.lengthFrames;
 				break;
 			}
 			cursor = until;
@@ -42,12 +42,13 @@ function createWindowedTransport(createSource, spec, port) {
 			throw new RangeError('Invalid command identity or schedule');
 		}
 		const next = {...(commands.at(-1)?.state || state), ...command};
-		if (!Number.isFinite(next.position) || (Object.hasOwn(command, "position") && (next.position < 0 || next.position > spec.lengthFrames))
+		const limit = source.lengthFrames ?? source.provenFrames;
+		if (!Number.isFinite(next.position) || (Object.hasOwn(command, "position") && (next.position < 0 || Math.ceil(next.position) > limit))
 			|| !Number.isFinite(next.rate) || next.rate <= 0 || next.rate > 4
 			|| !Number.isFinite(next.semitones) || Math.abs(next.semitones) > 48
 			|| typeof next.active !== 'boolean'
 			|| (next.loop !== null && (!Number.isFinite(next.loop?.start) || !Number.isFinite(next.loop?.end)
-				|| next.loop.start < 0 || next.loop.end > spec.lengthFrames || next.loop.end <= next.loop.start))
+				|| next.loop.start < 0 || Math.ceil(next.loop.end) > limit || next.loop.end <= next.loop.start))
 			|| (commands.length && command.atFrame < commands.at(-1).atFrame)) {
 			throw new RangeError('Invalid transport state');
 		}
@@ -64,9 +65,13 @@ function createWindowedTransport(createSource, spec, port) {
 		}
 		try {
 			if (message.type === 'window') {
-				const receipt = source.add(message.generation, message.start, message.channels);
+				const receipt = source.add(message.generation, message.start, message.channels, message.endFrame);
 				needKey = '';
-				send('window-accepted', {requestId: message.requestId, ...receipt});
+				send('window-accepted', {requestId: message.requestId, ...receipt, lengthFrames: source.lengthFrames});
+			} else if (message.type === 'eof') {
+				const receipt = source.finish(message.generation, message.endFrame);
+				needKey = '';
+				send('eof-accepted', {requestId: message.requestId, ...receipt});
 			} else if (message.type === 'drop') {
 				const released = source.drop(message.generation, message.starts);
 				send('released', {requestId: message.requestId, ...released.value, buffers: released.transfer}, released.transfer);
@@ -119,7 +124,7 @@ function createWindowedTransport(createSource, spec, port) {
 			}
 			const loop = state.loop;
 			const position = wrap(state.position, loop);
-			const active = state.active && (loop || presentedPosition < spec.lengthFrames);
+			const active = state.active && (loop || source.lengthFrames === null || presentedPosition < source.lengthFrames);
 			const missing = active && !drain ? source.read(position + inputLatency - input[0].length, input, loop) : null;
 			let nextStatus = !active ? 'paused' : missing ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
 			let validFrom = output[0].length;
@@ -193,7 +198,8 @@ function createWindowedTransport(createSource, spec, port) {
 				processingSourceFrame: position,
 				acceptedRate: state.rate, acceptedSemitones: state.semitones, acceptedLoop: loop,
 				outputRate,
-				active: state.active, status: nextStatus,
+				active: state.active, status: nextStatus, lengthFrames: source.lengthFrames,
+				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
 			applied.forEach((command, index) => send('applied', {requestId: command.requestId, commandId: command.id,
 				superseded: index < applied.length - 1,
