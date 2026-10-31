@@ -113,6 +113,33 @@ declare namespace SignalsmithStretch {
     command: ICommand;
   }
 
+  interface ITempoRegion {
+    startFrame: number;
+    endFrame: number;
+    firstBeatFrame: number;
+    framesPerBeat: number;
+    firstBeatIndex: number;
+  }
+
+  interface IMetronomeMessage extends IMessageIdentity {
+    type: "metronome";
+    requestId: string | number;
+    enabled: boolean;
+    regions: ITempoRegion[];
+  }
+
+  interface IMetronomeQueuedMessage extends IMessageIdentity {
+    type: "metronome-queued";
+    requestId: string | number;
+  }
+
+  interface IMetronomeAcceptedMessage extends IMessageIdentity {
+    type: "metronome-accepted";
+    requestId: string | number;
+    effectiveOutputFrame: number;
+    enabled: boolean;
+  }
+
   interface IReadFailedMessage extends IMessageIdentity {
     type: "read-failed";
   }
@@ -167,7 +194,7 @@ declare namespace SignalsmithStretch {
     type: "history-cancelled";
   }
 
-  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage | IObserveOutputMessage | IObserveHistoryMessage | ICancelObserveHistoryMessage;
+  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage | IObserveOutputMessage | IObserveHistoryMessage | ICancelObserveHistoryMessage | IMetronomeMessage;
 
   interface IOutputSegment {
     fromFrame: number;
@@ -276,6 +303,6 @@ declare namespace SignalsmithStretch {
   type WorkletMessage = IStateMessage | IAppliedMessage | INeedMessage | IReadyMessage | IAcceptedMessage
     | IEofAcceptedMessage | IReleasedMessage | IClosedMessage | IQueuedMessage | IRejectedMessage | IFailureMessage
     | IRetriedMessage | IOutputObservationMessage | IObservationQueuedMessage | IOutputHistoryMessage
-    | IHistoryQueuedMessage | IHistoryCancelledMessage;
+    | IHistoryQueuedMessage | IHistoryCancelledMessage | IMetronomeQueuedMessage | IMetronomeAcceptedMessage;
 }
 export default SignalsmithStretch;

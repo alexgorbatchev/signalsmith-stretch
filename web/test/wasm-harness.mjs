@@ -56,6 +56,7 @@ export async function openHarness(spec) {
 				channel.fill(0, 0, rendered.validFrom);
 				channel.fill(0, rendered.validTo);
 			});
+			transport.mix(rendered?.observation, output);
 			frame += 128;
 			return output;
 		},

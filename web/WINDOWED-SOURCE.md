@@ -243,3 +243,41 @@ Consumers must cap their own retained records/frame horizon and treat
 pre-generation, evicted and future output as unavailable. Correlate only retained
 committed ranges with `getOutputTimestamp()`; do not extrapolate. History source
 and embedded-WASM tests do not establish browser/device continuity qualification.
+
+## Render-thread grid metronome
+
+The source-fetching worker can send `{type: 'metronome', generation, requestId,
+enabled, regions}` through its existing source port. The default is disabled.
+Configuration is validated and copied atomically; at most one update can wait
+for a render quantum. `metronome-queued` acknowledges acceptance into that queue.
+`metronome-accepted` reports the actual `effectiveOutputFrame` of the render
+quantum that applies it and the accepted `enabled` value. Suspension does not
+invent an effective frame. Source closure rejects a pending update. Generation
+identity is checked by the same owner as every other source message.
+
+`regions` contains at most 4096 ordered, nonoverlapping tempo regions. Each has
+inclusive `startFrame`, exclusive `endFrame`, `firstBeatFrame` inside that range,
+finite `framesPerBeat` of at least one source sample, and safe-integer
+`firstBeatIndex`. Frame bounds are finite, nonnegative and no greater than
+`Number.MAX_SAFE_INTEGER`; the region's beat indices must also remain safe
+integers. Beats start at `firstBeatFrame` and continue by `framesPerBeat` until
+the exclusive end. Gaps contain no beats. An index divisible by four accents
+the downbeat. Invalid or oversized data rejects without changing configuration;
+there is no silent truncation. Compact tempo regions represent long regular
+grids without allocating one entry for every beat.
+
+The wrapper mixes clicks after copying and clipping actual WASM output. Beat
+crossings use each committed output segment's delayed source position, rate
+and loop, including a still-audible old loop after an accepted loop exit. The
+first output sample at or beyond a crossed beat starts a click; multiple beats
+crossed within one output sample coalesce into the first crossing. Clicks use
+a 30 ms sine with exponential gain decay to 0.001: 1760 Hz and initial gain 0.5
+on downbeats, otherwise 1100 Hz and gain 0.3. Pitch transposition does not
+transpose the click. The same click signal is added to each output channel.
+
+Pause, discontinuous seek, disabling or replacing the grid cuts its existing
+click tail. Valid delayed drain samples can still click. Preparation, starvation,
+source failure after valid drain, and EOF silence cannot create or sustain a
+click. No independent context, timer, future history extrapolation or
+main-thread scheduling deadline is involved. Native render tests qualify sample
+alignment; actual browser transport integration remains a separate gate.

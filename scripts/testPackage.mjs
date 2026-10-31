@@ -56,6 +56,12 @@ async function connect(context: AudioContext, port: MessagePort): Promise<Signal
   const history: SignalsmithStretch.IObserveHistoryMessage = {type: 'observe-history', generation: description.generation, requestId: 'history', fromFrame: 0};
   const historyRequest: SignalsmithStretch.WorkerMessage = history;
   port.postMessage(historyRequest);
+  const metronome: SignalsmithStretch.IMetronomeMessage = {type: 'metronome', generation: description.generation,
+    requestId: 'click', enabled: true, regions: [{startFrame: 0, endFrame: 480000, firstBeatFrame: 100.25, firstBeatIndex: 0, framesPerBeat: 24000}]};
+  const metronomeRequest: SignalsmithStretch.WorkerMessage = metronome;
+  port.postMessage(metronomeRequest);
+  // @ts-expect-error native beat periods use source frames
+  metronome.regions[0].framesPerBeat = '120bpm';
   const cancel: SignalsmithStretch.ICancelObserveHistoryMessage = {type: 'cancel-observe-history', generation: description.generation, requestId: 'cancel', observationRequestId: history.requestId};
   port.postMessage(cancel);
   // @ts-expect-error history watermark is a numeric rendered frame
@@ -84,6 +90,12 @@ async function connect(context: AudioContext, port: MessagePort): Promise<Signal
   return node;
 }
 function observe(message: SignalsmithStretch.WorkletMessage): number | null {
+  if (message.type === 'metronome-accepted') {
+    const enabled: boolean = message.enabled;
+    void enabled;
+    return message.effectiveOutputFrame;
+  }
+  if (message.type === 'metronome-queued') return null;
   if (message.type === 'output-history') {
     const records: SignalsmithStretch.IHistorySegment[] = SignalsmithStretch.decodeOutputHistory(message);
     const source: number | null = records[0]?.sourceFrame ?? null;

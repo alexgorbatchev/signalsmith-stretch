@@ -286,6 +286,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 						channel.fill(0, rendered.validTo);
 					});
 				}
+				this.windowedTransport.mix(rendered?.observation, outputList[0]);
 				return true;
 			}
 			if (!currentMapSegment.active) {

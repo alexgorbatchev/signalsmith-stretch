@@ -9,6 +9,48 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
 	let outputObserver = null;
 	let historyObserver = null;
+	let metronome = null, pendingMetronome = null, click = null, previousOutput = null;
+	// Compact tempo regions avoid a per-beat allocation for long sources. Each
+	// region owns its first beat and excludes its end; gaps contain no beats.
+	const checkedMetronome = message => {
+		if (typeof message.enabled !== 'boolean' || !Array.isArray(message.regions) || message.regions.length > 4096
+			|| !validRequestId(message.requestId) || pendingMetronome) throw new RangeError('Invalid metronome configuration');
+		let end = 0;
+		const regions = message.regions.map(region => {
+			if (!region || !Number.isFinite(region.startFrame) || !Number.isFinite(region.endFrame)
+				|| region.startFrame < end || region.endFrame <= region.startFrame || region.endFrame > Number.MAX_SAFE_INTEGER
+				|| !Number.isFinite(region.firstBeatFrame) || region.firstBeatFrame < region.startFrame || region.firstBeatFrame >= region.endFrame
+				|| !Number.isFinite(region.framesPerBeat) || region.framesPerBeat < 1
+				|| !Number.isSafeInteger(region.firstBeatIndex)
+				|| !Number.isSafeInteger(region.firstBeatIndex + Math.floor((region.endFrame - region.firstBeatFrame) / region.framesPerBeat))) {
+				throw new RangeError('Invalid metronome tempo region');
+			}
+			end = region.endFrame;
+			return {startFrame: region.startFrame, endFrame: end, firstBeatFrame: region.firstBeatFrame,
+				framesPerBeat: region.framesPerBeat, firstBeatIndex: region.firstBeatIndex};
+		});
+		pendingMetronome = {enabled: message.enabled, regions, requestId: message.requestId};
+		send('metronome-queued', {requestId: message.requestId});
+	};
+	const beatBetween = (from, to, inclusive = false, exclusiveEnd = false) => {
+		const regions = metronome.regions;
+		let low = 0, high = regions.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (regions[middle].endFrame <= from) low = middle + 1;
+			else high = middle;
+		}
+		// At most the current region and its successor can supply the first beat.
+		for (let index = low; index < Math.min(low + 2, regions.length); ++index) {
+			const region = regions[index];
+			let beat = Math.max(0, Math.ceil((from - region.firstBeatFrame) / region.framesPerBeat));
+			let at = region.firstBeatFrame + beat * region.framesPerBeat;
+			if (!inclusive && at <= from) at = region.firstBeatFrame + (++beat) * region.framesPerBeat;
+			if ((exclusiveEnd ? at < to : at <= to) && at < region.endFrame) return region.firstBeatIndex + beat;
+			if (region.startFrame > to) break;
+		}
+		return null;
+	};
 	const wrap = (position, loop) => loop
 		? loop.start + ((position - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
 		: position;
@@ -86,6 +128,8 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 			} else if (message.type === 'drop') {
 				const released = source.drop(message.generation, message.starts);
 				send('released', {requestId: message.requestId, ...released.value, buffers: released.transfer}, released.transfer);
+			} else if (message.type === 'metronome') {
+				checkedMetronome(message);
 			} else if (message.type === 'command') {
 				checkedCommand(message);
 			} else if (message.type === 'read-failed') {
@@ -138,12 +182,60 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 			outputObserver = null;
 			if (historyObserver) reject(historyObserver, 'source_closed');
 			historyObserver = null;
+			if (pendingMetronome) reject(pendingMetronome, 'source_closed');
+			pendingMetronome = metronome = click = previousOutput = null;
 			const released = source.drop(spec.generation, source.starts());
 			send('source-closed', {reason, buffers: released.transfer}, released.transfer);
 			port.close();
 		},
+		// Called after the wrapper copies/clips real WASM output. Only committed
+		// valid source segments can create or sustain a click, including a drain.
+		mix(observation, output) {
+			if (!metronome?.enabled || !observation) { click = previousOutput = null; return; }
+			let segmentIndex = 0;
+			for (let index = 0; index < output[0].length; ++index) {
+				const frame = observation.renderFrame + index;
+				while (segmentIndex < observation.outputSegments.length && observation.outputSegments[segmentIndex].toFrame <= frame) ++segmentIndex;
+				const segment = observation.outputSegments[segmentIndex];
+				if (!segment || segment.fromFrame > frame) { click = previousOutput = null; continue; }
+				const position = wrap(segment.sourceFrame + (frame - segment.fromFrame) * segment.rate, segment.loop);
+				const expected = previousOutput && wrap(previousOutput.position + previousOutput.rate, previousOutput.loop);
+				const continuous = previousOutput && previousOutput.frame + 1 === frame
+					&& Math.abs(expected - position) <= Number.EPSILON * Math.max(1, Math.abs(expected), Math.abs(position)) * 2;
+				if (!continuous) click = null;
+				let beat = beatBetween(position, position, true);
+				if (continuous) {
+					const previous = previousOutput.position;
+					const loop = previousOutput.loop;
+					if (loop && (position < previous || previousOutput.rate >= loop.end - loop.start)) {
+						beat = beatBetween(previous, loop.end, false, true)
+							?? beatBetween(loop.start, previousOutput.rate >= loop.end - loop.start
+								? loop.end : position, true, previousOutput.rate >= loop.end - loop.start);
+					} else beat = beatBetween(previous, position);
+				}
+				if (beat !== null) click = {age: 0, downbeat: beat % 4 === 0};
+				if (click) {
+					const time = click.age / spec.sampleRate;
+					const gain = click.downbeat ? .5 : .3;
+					const value = gain * Math.exp(Math.log(.001 / gain) * time / .03)
+						* Math.sin(2 * Math.PI * (click.downbeat ? 1760 : 1100) * time);
+					for (const channel of output) channel[index] += value;
+					if (++click.age >= Math.ceil(.03 * spec.sampleRate)) click = null;
+				}
+				previousOutput ??= {};
+				previousOutput.frame = frame;
+				previousOutput.position = position;
+				previousOutput.rate = segment.rate;
+				previousOutput.loop = segment.loop;
+			}
+		},
 		render(frame, output, input, wasm, inputLatency, outputLatency) {
 			if (closed) return;
+			if (pendingMetronome) {
+				metronome = pendingMetronome;
+				pendingMetronome = click = previousOutput = null;
+				send('metronome-accepted', {requestId: metronome.requestId, effectiveOutputFrame: frame, enabled: metronome.enabled});
+			}
 			const applied = [];
 			while (commands.length && commands[0].atFrame <= frame) {
 				const command = commands.shift();
@@ -151,6 +243,7 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 					: !command.state.active ? presentedPosition : state.position;
 				state = {...command.state, position};
 				if (command.seek || !state.active) {
+					click = previousOutput = null;
 					wasm._reset();
 					outputTimeline = [];
 					drain = null;
