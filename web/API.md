@@ -1,25 +1,8 @@
-# Signalsmith Stretch Web
+# Web Audio API
 
-`@alexgorbatchev/signalsmith-stretch` provides Web Audio time stretching and pitch shifting with a bounded, windowed buffer transport. It retains Signalsmith Audio's MIT-licensed Signalsmith Stretch 1.3.2 WASM DSP. ESM and CommonJS imports resolve to callable factories with matching TypeScript declarations; the standalone `.js` artifact remains available for script loading.
+Call semantics for `@alexgorbatchev/signalsmith-stretch`.
 
-The [windowed source protocol](WINDOWED-SOURCE.md) documents `attachSource()`, transferred PCM ownership, loop-aware analysis, command acknowledgements, and output-clock limitations. Live-input and append-only buffer operation are described below.
 
-## Installation
-
-```sh
-npm install @alexgorbatchev/signalsmith-stretch@1.3.3-dev.2
-```
-
-```js
-import SignalsmithStretch from '@alexgorbatchev/signalsmith-stretch';
-```
-
-CommonJS consumers use `const SignalsmithStretch = require('@alexgorbatchev/signalsmith-stretch')`.
-Both entry points load without browser globals; creating a node requires a Web Audio context with AudioWorklet support in a secure browser context. The package includes its WASM payload and installs its worklet through a Blob URL unless `SignalsmithStretch.moduleUrl` specifies a separately hosted module.
-
-The original license and exact upstream source boundary are included as [LICENSE.txt](LICENSE.txt) and [UPSTREAM.md](UPSTREAM.md). The wrapper does not decode media or fetch PCM; the source worker owns those operations and their memory budget.
-
-## How to use it
 
 Call `SignalsmithStretch(audioContext, ?channelOptions)` from the main thread.  This returns a Promise which resolves to an `AudioNode`, with extra methods attached to it.  The optional [`channelOptions` object](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletNode/AudioWorkletNode#options) can specify the number of inputs/outputs and channels.
 

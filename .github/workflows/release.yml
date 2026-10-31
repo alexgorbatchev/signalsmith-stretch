@@ -1,0 +1,42 @@
+name: Publish npm package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'alexgorbatchev/signalsmith-stretch'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Validate release version and select npm tag
+        id: release
+        run: node scripts/checkRelease.mjs
+      - run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:package
+      - run: git diff --exit-code -- web/release
+      - name: Publish with npm trusted publishing
+        run: npm publish --ignore-scripts --access public --tag "$NPM_TAG"
+        env:
+          NPM_TAG: ${{ steps.release.outputs.tag }}

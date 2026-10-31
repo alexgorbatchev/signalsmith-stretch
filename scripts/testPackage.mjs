@@ -10,9 +10,11 @@ const temporaryRoot = join(root, '.tmp');
 mkdirSync(temporaryRoot, {recursive: true});
 const directory = mkdtempSync(join(temporaryRoot, 'package-consumer-'));
 const run = (command, args, cwd = directory) => execFileSync(command, args, {
-  cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']
+  cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
+  // A publish dry-run must still create and install the test tarball.
+  env: {...process.env, npm_config_dry_run: 'false'}
 });
-const packed = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], join(root, 'web/release')))[0];
+const packed = JSON.parse(run('npm', ['pack', '--foreground-scripts=false', '--json', '--pack-destination', directory], root))[0];
 const archive = join(directory, packed.filename);
 writeFileSync(join(directory, 'package.json'), JSON.stringify({private: true, type: 'module'}));
 run('npm', ['install', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund',

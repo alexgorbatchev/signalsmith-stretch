@@ -24,7 +24,7 @@ Emscripten through the existing `web/emscripten/compile.sh` workflow. A wrapper-
 build can reuse the unchanged checked-in `web/emscripten/main.js` with
 `make -C web -o emscripten/main.js`.
 
-The fork publishes `web/release` as `@alexgorbatchev/signalsmith-stretch`.
+The fork publishes the repository root as `@alexgorbatchev/signalsmith-stretch`.
 The generated `.cjs` file is the standalone wrapper in CommonJS module format;
 `.mjs` supplies the default ESM factory. Both have generated module-specific
 declarations from `web/SignalsmithStretch.d.ts`. `web/release/UPSTREAM.md` and

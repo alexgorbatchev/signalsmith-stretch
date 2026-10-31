@@ -1,11 +1,57 @@
 {
-  "name": "signalsmith-stretch-development",
-  "private": true,
+  "name": "@alexgorbatchev/signalsmith-stretch",
+  "version": "1.3.3-dev.2",
+  "description": "JS/WASM release of the Signalsmith Stretch library",
+  "main": "./web/release/SignalsmithStretch.cjs",
+  "types": "./web/release/SignalsmithStretch.d.mts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./web/release/SignalsmithStretch.d.mts",
+        "default": "./web/release/SignalsmithStretch.mjs"
+      },
+      "require": {
+        "types": "./web/release/SignalsmithStretch.d.cts",
+        "default": "./web/release/SignalsmithStretch.cjs"
+      }
+    },
+    "./SignalsmithStretch.js": "./web/release/SignalsmithStretch.js"
+  },
   "type": "module",
+  "files": [
+    "web/release/SignalsmithStretch.*",
+    "web/WINDOWED-SOURCE.md",
+    "LICENSE.txt",
+    "UPSTREAM.md",
+    "web/API.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexgorbatchev/signalsmith-stretch.git"
+  },
+  "keywords": [
+    "audio",
+    "pitch",
+    "time",
+    "web-audio"
+  ],
+  "author": "Geraint Luff",
+  "license": "MIT",
+  "module": "./web/release/SignalsmithStretch.mjs",
+  "homepage": "https://github.com/alexgorbatchev/signalsmith-stretch#readme",
+  "bugs": {
+    "url": "https://github.com/alexgorbatchev/signalsmith-stretch/issues"
+  },
   "scripts": {
     "build": "make -C web -o emscripten/main.js",
-    "test": "make -C web test",
-    "test:package": "node scripts/testPackage.mjs"
+    "test": "make -C web test && node --test scripts/*.test.mjs",
+    "test:package": "node scripts/testPackage.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm test && npm run test:package"
   },
   "devDependencies": {
     "typescript": "6.0.3"
