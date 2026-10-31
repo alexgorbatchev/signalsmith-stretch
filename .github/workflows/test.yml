@@ -19,5 +19,6 @@ jobs:
       - run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
       - run: npm run build
       - run: npm test
+      - run: npm run test:coverage
       - run: npm run test:package
       - run: git diff --exit-code -- web/release

@@ -131,9 +131,11 @@ rate changes retain DSP history.
 `acceptedSemitones` from the output's `sourceFrame`, `outputRate`, `validFrom` and
 `validTo`. An unavailable `sourceFrame` is `null`. `nextSourceFrame` is the last
 valid emitted source boundary and advances only while valid output is emitted,
-including a pending tail; it freezes after that tail. Positions
-wrap inside the accepted loop, including analysis pre/post-roll across either
-boundary and multiple wraps per quantum. Natural end clips against each delayed
+including a pending tail; it freezes after that tail.
+Processing positions wrap inside the accepted loop, including analysis pre/post-roll
+across either boundary and multiple wraps per quantum. Output positions retain the
+loop of their delayed output segment, including after a different loop or loop exit
+has been accepted. Natural end clips against each delayed
 output segment's own rate and loop, rather than current processing settings, and
 masks output after the source boundary.
 `lengthFrames` remains `null` until exact EOF is known. `ended` is true when the
@@ -142,6 +144,31 @@ natural output completion, an explicit seek to the end and an empty source; it
 does not prove that audio was emitted. Natural completion retains the `paused`
 status value; `ended` distinguishes it from a user pause. An empty source emits no
 valid source frame.
+
+Each observation includes `outputSegments`, describing only valid source output
+within that render quantum. A segment contains absolute AudioContext output-frame
+bounds `fromFrame` (inclusive) and `toFrame` (exclusive), the source position at
+`fromFrame`, its rate and its own loop bounds or `null`. Within that interval,
+advance the source position by elapsed output frames times rate, wrapping in the
+segment's loop. A quantum can contain more than one delayed segment; do not infer
+its output loop or rate from current accepted settings. `renderedThroughFrame` is
+the exclusive render-quantum boundary, not permission to extrapolate valid source
+output into silence or beyond the listed segment bounds. Empty segments describe
+no valid source output during pause, preparation, exhausted underrun or empty EOF.
+
+The low-frequency `state` notifications are status observations, not a continuous
+output clock. A source worker can send `observe-output` to request a snapshot at
+the next native render quantum. The worklet replies `observation-queued`, then
+`output-observation` with the same request identity and the quantum's observation.
+Only one request can await rendering; another is rejected with
+`observation_pending`. Rendering does not emit additional requested snapshots
+until the worker requests another. This gives the consumer quantum-driven
+backpressure without accumulating unsolicited per-quantum messages when it is
+slow or throttled. Detaching rejects an awaiting request with `source_closed`.
+The consumer must bound retained snapshots, discard stale generation data and
+report unavailable clock coverage when the requested output frame is outside
+retained valid segments. Neither accepted future commands nor latent DSP history
+authorize a guessed future source position.
 
 Output frames refer to the AudioContext render stream, not the physical device.
 Device-clock mapping belongs to the consumer's `AudioContext.getOutputTimestamp()`

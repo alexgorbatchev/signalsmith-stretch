@@ -1,40 +1,7 @@
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
-import {createContext, runInContext} from 'node:vm';
-import {MessageChannel, MessagePort} from 'node:worker_threads';
-
-// Host only the AudioWorklet class/registration API. DSP, ports, and RPC dispatch
-// are the real published wrapper and embedded WASM, not substitute algorithms.
-async function openProcessor() {
-	const {port1, port2} = new MessageChannel();
-	let Processor;
-	const context = createContext({
-		Float32Array, ArrayBuffer, MessagePort, sampleRate: 48000, currentFrame: 0, currentTime: 0,
-		AudioWorkletProcessor: class { constructor() { this.port = port1; } },
-		registerProcessor(_name, value) { Processor = value; }
-	});
-	const source = ['emscripten/main.js', 'windowed-source.js', 'windowed-transport.js', 'web-wrapper.js']
-		.map(path => readFileSync(new URL('../' + path, import.meta.url), 'utf8')).join('\n');
-	runInContext(source, context);
-	const ready = new Promise(resolve => port2.once('message', resolve));
-	const processor = new Processor({numberOfOutputs: 1, outputChannelCount: [1]});
-	assert.equal((await ready)[0], 'ready');
-	let id = 0;
-	return {
-		processor,
-		async call(method, args = [], transfer = []) {
-			const request = ++id;
-			const response = new Promise(resolve => port2.once('message', resolve));
-			port2.postMessage([request, method, ...args], transfer);
-			const result = await response;
-			assert.equal(result[0], request);
-			if (result[2]) throw Object.assign(new Error(result[2].message), {name: result[2].name});
-			return result[1];
-		},
-		close() { processor.windowedTransport?.close(); port1.close(); port2.close(); }
-	};
-}
+import {MessageChannel} from 'node:worker_threads';
+import {openProcessor} from './worklet-harness.mjs';
 
 test('zero-input source nodes remain silent before attach, while paused, and after detach', async () => {
 	const host = await openProcessor();

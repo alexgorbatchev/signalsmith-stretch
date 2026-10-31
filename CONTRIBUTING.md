@@ -4,11 +4,13 @@ Use Node.js 22 or newer, npm, and GNU Make. The checked-in WASM payload is reuse
 
 1. Run `npm ci --ignore-scripts --registry=https://registry.npmjs.org`.
 2. Run `npm run build` to regenerate the ESM, CommonJS, standalone browser, and declaration artifacts in `web/release`.
-3. Run `npm test` for source and embedded-WASM behavior.
+3. Run `npm test` for source and embedded-WASM behavior, then `npm run test:coverage` for the coverage gate.
 4. Run `npm run test:package` to pack the repository root, install the tarball into an isolated consumer, invoke both factories, and compile ESM/CommonJS TypeScript consumers.
 5. Commit generated artifacts alongside their sources. CI rejects differences after rebuilding.
 
 `npm pack` builds automatically through `prepack`. Local `npm publish` also runs the behavioral and installed-package checks through `prepublishOnly`. The package's explicit file allowlist excludes development sources and dependencies.
+
+Coverage uses pinned c8 with V8 execution data on Node.js 22.12 or newer. It includes every first-party JavaScript source directly in `web/` (`windowed-source.js`, `windowed-transport.js`, and `web-wrapper.js`), including unexecuted files, and requires at least 90% lines and functions for each file. Embedded upstream WASM/glue, generated release copies, tests, and `scripts/` are outside this source scope. Native VM harnesses retain source filenames so their actual execution is attributed to the owning files. Reports are written to `.tmp/coverage/`. Tests provide host registration boundaries and real MessagePorts while executing the actual wrapper and embedded WASM; these are native Node proofs, not browser/device-timing qualification. CI and local publication run the same gate.
 
 See [UPSTREAM.md](UPSTREAM.md) before recompiling the embedded WASM. The native C++ API is documented in [CPP.md](CPP.md).
 

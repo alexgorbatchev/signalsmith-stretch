@@ -113,10 +113,23 @@ declare namespace SignalsmithStretch {
     type: "retry";
   }
 
-  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage;
+  interface IObserveOutputMessage extends IMessageIdentity {
+    type: "observe-output";
+  }
+
+  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage | IObserveOutputMessage;
+
+  interface IOutputSegment {
+    fromFrame: number;
+    toFrame: number;
+    sourceFrame: number;
+    rate: number;
+    loop: ILoop | null;
+  }
 
   interface IObservation {
     renderFrame: number;
+    renderedThroughFrame: number;
     validFrom: number;
     validTo: number;
     sourceFrame: number | null;
@@ -126,6 +139,7 @@ declare namespace SignalsmithStretch {
     acceptedSemitones: number;
     acceptedLoop: ILoop | null;
     outputRate: number | null;
+    outputSegments: IOutputSegment[];
     active: boolean;
     lengthFrames: number | null;
     ended: boolean;
@@ -136,6 +150,14 @@ declare namespace SignalsmithStretch {
 
   interface IStateMessage extends IMessageIdentity, IObservation {
     type: "state";
+  }
+
+  interface IOutputObservationMessage extends IMessageIdentity, IObservation {
+    type: "output-observation";
+  }
+
+  interface IObservationQueuedMessage extends IMessageIdentity {
+    type: "observation-queued";
   }
 
   interface IAppliedMessage extends IMessageIdentity, IObservation {
@@ -203,6 +225,6 @@ declare namespace SignalsmithStretch {
 
   type WorkletMessage = IStateMessage | IAppliedMessage | INeedMessage | IReadyMessage | IAcceptedMessage
     | IEofAcceptedMessage | IReleasedMessage | IClosedMessage | IQueuedMessage | IRejectedMessage | IFailureMessage
-    | IRetriedMessage;
+    | IRetriedMessage | IOutputObservationMessage | IObservationQueuedMessage;
 }
 export = SignalsmithStretch;

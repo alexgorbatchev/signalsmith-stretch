@@ -48,6 +48,6 @@ The build deliberately reuses checked-in WASM. Read [UPSTREAM.md](UPSTREAM.md) b
 
 For executable behavior changes, add or update meaningful behavioral tests. Require at least 90% line and function coverage across each affected first-party package's non-test source, including unexecuted files and excluding `scripts/`. Configure and document the coverage command, source scope, metrics, and exclusions; do not weaken gates or add token tests. Reproduce blocking baseline failures on the untouched base before the smallest necessary prerequisite repair.
 
-The existing npm scripts and CI do not configure this coverage gate. Treat enforcement as follow-up implementation work; instruction-only maintenance does not require adding coverage tooling. Preserve the existing build, behavioral, consumer, and generated-file checks.
+Run `npm run test:coverage` for the executable coverage gate. It checks every first-party JavaScript source directly in `web/`, including unexecuted files, at 90% lines and functions per file. See the maintainer guide for source scope and exclusions. Preserve the existing build, behavioral, consumer, and generated-file checks.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the maintainer guide. Keep standing instructions current in place; exclude task history, progress reports, and handoff notes.

@@ -1,10 +1,11 @@
+import {fileURLToPath} from 'node:url';
 import {readFileSync} from 'node:fs';
 import {runInThisContext} from 'node:vm';
 import {MessageChannel} from 'node:worker_threads';
 
-const moduleFactory = runInThisContext(readFileSync(new URL('../emscripten/main.js', import.meta.url), 'utf8') + '\nSignalsmithStretch;');
-const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource;');
-const createTransport = runInThisContext(readFileSync(new URL('../windowed-transport.js', import.meta.url), 'utf8') + '\ncreateWindowedTransport;');
+const moduleFactory = runInThisContext(readFileSync(new URL('../emscripten/main.js', import.meta.url), 'utf8') + '\nSignalsmithStretch', {filename: fileURLToPath(new URL("../emscripten/main.js", import.meta.url))});
+const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource', {filename: fileURLToPath(new URL("../windowed-source.js", import.meta.url))});
+const createTransport = runInThisContext(readFileSync(new URL('../windowed-transport.js', import.meta.url), 'utf8') + '\ncreateWindowedTransport', {filename: fileURLToPath(new URL("../windowed-transport.js", import.meta.url))});
 
 export async function openHarness(spec) {
 	const wasm = await moduleFactory();

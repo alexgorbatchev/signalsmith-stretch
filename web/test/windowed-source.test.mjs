@@ -1,9 +1,10 @@
+import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInThisContext} from 'node:vm';
 import {test} from 'node:test';
 
-const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource;');
+const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource', {filename: fileURLToPath(new URL("../windowed-source.js", import.meta.url))});
 const spec = {generation: 'track-1', sampleRate: 48000, channels: 1, lengthFrames: 48000 * 3600 * 12, capacityFrames: 32};
 
 test('unknown end remains missing until an atomic final PCM window establishes exact EOF', () => {

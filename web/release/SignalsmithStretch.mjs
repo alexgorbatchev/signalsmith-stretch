@@ -185,6 +185,7 @@ function createWindowedTransport(createSource, spec, port) {
 	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
 	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
+	let outputObserver = null;
 	const wrap = (position, loop) => loop
 		? loop.start + ((position - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
 		: position;
@@ -194,7 +195,7 @@ function createWindowedTransport(createSource, spec, port) {
 		return segment && segment.frame <= frame
 			? wrap(segment.position + (frame - segment.frame) * segment.rate, segment.loop) : null;
 	};
-	const present = (frame, length, validFrom) => {
+	const present = (frame, length, validFrom, segments) => {
 		let validTo = length;
 		let cursor = frame + validFrom;
 		const end = frame + length;
@@ -204,9 +205,13 @@ function createWindowedTransport(createSource, spec, port) {
 			const until = Math.min(end, outputTimeline[1]?.frame ?? end);
 			if (!segment.loop && source.lengthFrames !== null && current + (until - cursor) * segment.rate >= source.lengthFrames) {
 				validTo = Math.max(validFrom, Math.ceil(cursor - frame + (source.lengthFrames - current) / segment.rate));
+				if (frame + validTo > cursor) segments.push({fromFrame: cursor, toFrame: frame + validTo,
+					sourceFrame: current, rate: segment.rate, loop: null});
 				presentedPosition = source.lengthFrames;
 				break;
 			}
+			segments.push({fromFrame: cursor, toFrame: until, sourceFrame: current, rate: segment.rate,
+				loop: segment.loop ? {...segment.loop} : null});
 			cursor = until;
 			presentedPosition = outputPosition(cursor);
 		}
@@ -264,6 +269,13 @@ function createWindowedTransport(createSource, spec, port) {
 				sourceFailed = false;
 				needKey = '';
 				send('retry-accepted', {requestId: message.requestId});
+			} else if (message.type === 'observe-output') {
+				if (outputObserver) {
+					reject(message, 'observation_pending');
+				} else {
+					outputObserver = {requestId: message.requestId};
+					send('observation-queued', outputObserver);
+				}
 			} else {
 				reject(message, 'unknown_message');
 			}
@@ -281,6 +293,8 @@ function createWindowedTransport(createSource, spec, port) {
 			outputTimeline = [];
 			commands.forEach(command => reject(command, 'source_closed'));
 			commands = [];
+			if (outputObserver) reject(outputObserver, 'source_closed');
+			outputObserver = null;
 			const released = source.drop(spec.generation, source.starts());
 			send('source-closed', {reason, buffers: released.transfer}, released.transfer);
 			port.close();
@@ -310,6 +324,7 @@ function createWindowedTransport(createSource, spec, port) {
 			let validTo = output[0].length;
 			let sourceFrame = null;
 			let outputRate = null;
+			const outputSegments = [];
 			let samples = null, processed = false;
 			// An interrupted preparation has no valid native tail yet: flushing
 			// it would label unprimed zeros as source progress. Only drain DSP
@@ -332,7 +347,7 @@ function createWindowedTransport(createSource, spec, port) {
 				validFrom = Math.max(0, Math.min(count, outputTimeline[0].frame - frame));
 				sourceFrame = validFrom < count ? outputPosition(frame + validFrom) : null;
 				outputRate = sourceFrame === null ? null : outputTimeline[0].rate;
-				validTo = present(frame, count, validFrom);
+				validTo = present(frame, count, validFrom, outputSegments);
 				nextStatus = "draining";
 				drain.offset += count;
 				if (drain.offset === outputLatency) {
@@ -356,7 +371,7 @@ function createWindowedTransport(createSource, spec, port) {
 				outputRate = sourceFrame === null ? null : outputTimeline[0].rate;
 				if (validFrom < output[0].length) {
 					nextStatus = 'playing';
-					validTo = present(frame, output[0].length, validFrom);
+					validTo = present(frame, output[0].length, validFrom, outputSegments);
 				}
 				state.position = position + output[0].length * state.rate;
 			}
@@ -373,13 +388,18 @@ function createWindowedTransport(createSource, spec, port) {
 						required: Boolean(missing), retain: source.ranges(position + inputLatency - input[0].length, input[0].length + 1, loop)});
 				}
 			}
-			const observation = {renderFrame: frame, validFrom, validTo, sourceFrame, nextSourceFrame: presentedPosition,
+			const observation = {renderFrame: frame, renderedThroughFrame: frame + output[0].length,
+				validFrom, validTo, sourceFrame, nextSourceFrame: presentedPosition,
 				processingSourceFrame: position,
 				acceptedRate: state.rate, acceptedSemitones: state.semitones, acceptedLoop: loop,
-				outputRate,
+				outputRate, outputSegments,
 				active: state.active, status: nextStatus, lengthFrames: source.lengthFrames,
 				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
+			if (outputObserver) {
+				send('output-observation', {...outputObserver, ...observation});
+				outputObserver = null;
+			}
 			applied.forEach((command, index) => send('applied', {requestId: command.requestId, commandId: command.id,
 				superseded: index < applied.length - 1,
 				effectiveOutputFrame: index < applied.length - 1 ? null
