@@ -1,4 +1,4 @@
-function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport) {
+function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport, createHistory) {
 	class WasmProcessor extends AudioWorkletProcessor {
 		constructor(options) {
 			super(options);
@@ -36,7 +36,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 						|| spec.capacityFrames < this.bufferLength + 2) {
 						throw new RangeError('Source must match the worklet rate and channels and supply a MessagePort');
 					}
-					const transport = createTransport(createSource, spec, port);
+					const transport = createTransport(createSource, spec, port, createHistory);
 					this.windowedTransport?.close();
 					this.windowedTransport = transport;
 					this.wasmModule._reset();
@@ -389,7 +389,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 SignalsmithStretch = ((Module, audioNodeKey) => {
 	if (typeof AudioWorkletProcessor === "function" && typeof registerProcessor === "function") {
 		// AudioWorklet side
-		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport);
+		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport, createOutputHistory);
 		return {};
 	}
 	let promiseKey = Symbol();
@@ -412,7 +412,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			if (!audioContext[promiseKey]) {
 				let moduleUrl = createNode.moduleUrl;
 				if (!moduleUrl) {
-					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport})`;
+					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport},${createOutputHistory})`;
 					moduleUrl = URL.createObjectURL(new Blob([moduleCode], {type: 'text/javascript'}));
 				}
 				audioContext[promiseKey] = audioContext.audioWorklet.addModule(moduleUrl);
@@ -473,6 +473,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 	};
 	return createNode;
 })(SignalsmithStretch, "signalsmith-stretch");
+SignalsmithStretch.decodeOutputHistory = decodeOutputHistory;
 // register as a CommonJS/AMD module
 if (typeof exports === 'object' && typeof module === 'object') {
 	module.exports = SignalsmithStretch;

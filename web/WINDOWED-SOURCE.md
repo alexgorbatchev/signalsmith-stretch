@@ -175,3 +175,71 @@ Device-clock mapping belongs to the consumer's `AudioContext.getOutputTimestamp(
 observation. A suspended/interrupted context does not render; the port cannot
 acknowledge a command before rendering resumes. Browser output and lifecycle
 qualification are distinct from the embedded-WASM Node tests.
+
+## Bounded committed-output history
+
+An attachment may opt into `outputHistory: {maxFrames, maxRecords,
+maxReplyRecords}`. All bounds are safe integers: `maxFrames` is 1 through
+4294967295, `maxRecords` is 1 through 4096, and `maxReplyRecords` is 1 through
+`min(maxRecords, 256)`. Invalid bounds reject attachment before replacing an
+existing generation. PCM residency remains separately bounded by
+`capacityFrames`.
+
+The worklet retains actual committed render intervals in a preallocated numeric
+ring of eight Float64 values per record: at most 256 KiB of numeric ring storage.
+It prunes on every append, even without a requesting observer, by both frame
+horizon and record capacity. These are numeric storage bounds, not a claim about
+JavaScript engine heap overhead. A copied reply contains at most 256 records
+(16 KiB numeric payload); transferring it never detaches the live ring.
+
+Send `{type: 'observe-history', generation, requestId, fromFrame}` through the
+source worker's port. `fromFrame` is the inclusive first requested output frame.
+Use the previous reply's exclusive `returnedThroughFrame` for the next request.
+Request IDs are nonempty strings or safe integers, so cancellation targets remain
+stable across structured cloning. Use a unique ID for every outstanding request.
+Negative, unsafe or future frames reject. A request behind committed output
+returns immediately. A request at the committed boundary waits for the next
+actual render; before the first render only frame zero is accepted. One waiting
+history credit is allowed. A duplicate rejects with `observation_pending`.
+`{type: 'cancel-observe-history', generation, requestId,
+observationRequestId}` cancels that waiting request with `observation_cancelled`
+and acknowledges with `history-cancelled`. Detach/replacement settles the waiting
+credit with `source_closed`. A suspended context creates no history or fabricated
+progress; its request can remain pending until resume, cancellation or closure.
+Actual browser port delivery during suspension requires platform qualification.
+
+An `output-history` reply contains:
+
+- `generationStartFrame`: first actual committed render frame, null before one.
+- `oldestRetainedFrame`: inclusive retained coverage boundary, null before render.
+- `renderedThroughFrame`: exclusive boundary of all committed output.
+- `returnedThroughFrame`: exclusive end of this bounded reply, which can precede
+  `renderedThroughFrame`. An empty reply returns the requested frame only inside
+  the committed generation domain; before the first render it is null.
+- `preGenerationThroughFrame`: the generation start when the request precedes
+  attachment's first render, otherwise null. No attachment-gap audio is invented.
+- `truncatedBeforeFrame`: oldest retained frame if requested generation coverage
+  was evicted, otherwise null. Eviction is unavailable coverage, never silence.
+- `records`: an owned copied Float64Array, with stride eight:
+  `[fromFrame, toFrame, sourceFrame, rate, loopStart, loopEnd, status, ended]`.
+
+`SignalsmithStretch.decodeOutputHistory(reply)` validates the envelope, bounded
+stride/count, ordered contiguous temporal ranges, status and NaN conventions,
+and returns named records. Status codes are 0 playing, 1 draining, 2 paused,
+3 preparing, 4 underrun, 5 source-error and 6 ended. Only playing/draining have
+finite source position and rate; silence uses NaN for source/rate/loop fields.
+Absent loop bounds are both NaN. All intervals are inclusive/exclusive.
+
+Source records use their own delayed rate and loop, including when pruning or
+reply clipping cuts through a fractional loop. Seek/pause reset DSP preparation
+without erasing already committed history in the same generation. Draining
+records remain valid source coverage until the actual copied tail ends, followed
+by the observed silence reason. `ended` is false on every real audio record,
+including the last one. Only known EOF silence is marked ended, beginning at the
+exclusive end of the last real tail, or immediately for an accepted seek-to-end.
+It does not reinterpret the existing accepted-position `IObservation.ended`.
+
+Consumers must cap their own retained records/frame horizon and treat
+pre-generation, evicted and future output as unavailable. Correlate only retained
+committed ranges with `getOutputTimestamp()`; do not extrapolate. History source
+and embedded-WASM tests do not establish browser/device continuity qualification.

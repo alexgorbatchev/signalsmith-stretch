@@ -1,12 +1,14 @@
 // Buffer transport for one immutable source generation. All methods run in the
 // AudioWorklet; the supplied MessagePort belongs to the source-fetching worker.
-function createWindowedTransport(createSource, spec, port) {
+function createWindowedTransport(createSource, spec, port, createHistory) {
+	const history = spec.outputHistory ? createHistory(spec.outputHistory) : null;
 	const source = createSource(spec);
 	spec = source.description;
 	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
 	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
 	let outputObserver = null;
+	let historyObserver = null;
 	const wrap = (position, loop) => loop
 		? loop.start + ((position - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
 		: position;
@@ -40,6 +42,10 @@ function createWindowedTransport(createSource, spec, port) {
 	};
 	const send = (type, data, transfer = []) => port.postMessage({type, generation: spec.generation, ...data}, transfer);
 	const reject = (message, code) => send('rejected', {requestId: message.requestId, code});
+	const validRequestId = value => typeof value === 'string' && value.length > 0 || Number.isSafeInteger(value);
+	const replyHistory = (message, reply = history.read(message.fromFrame)) => {
+		send('output-history', {requestId: message.requestId, ...reply}, [reply.records.buffer]);
+	};
 	const checkedCommand = message => {
 		const command = message.command;
 		if (!command || !Number.isSafeInteger(command.id) || command.id <= lastCommandId
@@ -90,6 +96,20 @@ function createWindowedTransport(createSource, spec, port) {
 				sourceFailed = false;
 				needKey = '';
 				send('retry-accepted', {requestId: message.requestId});
+			} else if (message.type === 'observe-history') {
+				if (!history || !validRequestId(message.requestId)) throw new RangeError('History unavailable or invalid request identity');
+				const reply = history.read(message.fromFrame);
+				if (historyObserver) reject(message, 'observation_pending');
+				else if (message.fromFrame < history.renderedThroughFrame) replyHistory(message, reply);
+				else {
+					historyObserver = {requestId: message.requestId, fromFrame: message.fromFrame};
+					send('history-queued', {requestId: message.requestId});
+				}
+			} else if (message.type === 'cancel-observe-history') {
+				if (!validRequestId(message.requestId) || !historyObserver || historyObserver.requestId !== message.observationRequestId) throw new RangeError('Unknown history observation');
+				reject(historyObserver, 'observation_cancelled');
+				historyObserver = null;
+				send('history-cancelled', {requestId: message.requestId});
 			} else if (message.type === 'observe-output') {
 				if (outputObserver) {
 					reject(message, 'observation_pending');
@@ -116,6 +136,8 @@ function createWindowedTransport(createSource, spec, port) {
 			commands = [];
 			if (outputObserver) reject(outputObserver, 'source_closed');
 			outputObserver = null;
+			if (historyObserver) reject(historyObserver, 'source_closed');
+			historyObserver = null;
 			const released = source.drop(spec.generation, source.starts());
 			send('source-closed', {reason, buffers: released.transfer}, released.transfer);
 			port.close();
@@ -141,6 +163,7 @@ function createWindowedTransport(createSource, spec, port) {
 			const active = state.active && (loop || source.lengthFrames === null || presentedPosition < source.lengthFrames);
 			const missing = active && !drain ? source.read(position + inputLatency - input[0].length, input, loop) : null;
 			let nextStatus = !active ? 'paused' : missing ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
+			const silenceStatus = !active ? 'paused' : missing || drain ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
 			let validFrom = output[0].length;
 			let validTo = output[0].length;
 			let sourceFrame = null;
@@ -217,6 +240,11 @@ function createWindowedTransport(createSource, spec, port) {
 				active: state.active, status: nextStatus, lengthFrames: source.lengthFrames,
 				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
+			history?.append(observation, silenceStatus);
+			if (historyObserver) {
+				replyHistory(historyObserver);
+				historyObserver = null;
+			}
 			if (outputObserver) {
 				send('output-observation', {...outputObserver, ...observation});
 				outputObserver = null;

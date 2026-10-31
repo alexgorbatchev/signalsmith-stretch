@@ -177,15 +177,141 @@ function createWindowedSource(spec) {
 		}
 	};
 }
+// Fixed numeric storage; only freshly copied reply buffers cross the port.
+function createOutputHistory(options) {
+	const {maxFrames, maxRecords, maxReplyRecords} = options || {};
+	if (!Number.isSafeInteger(maxFrames) || maxFrames < 1 || maxFrames > 0xffffffff
+		|| !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 4096
+		|| !Number.isSafeInteger(maxReplyRecords) || maxReplyRecords < 1 || maxReplyRecords > Math.min(256, maxRecords)) {
+		throw new RangeError('Invalid output history bounds');
+	}
+	const ring = new Float64Array(maxRecords * 8);
+	let head = 0, count = 0, start = null, through = null;
+	const at = index => ((head + index) % maxRecords) * 8;
+	const clip = (record, frame) => {
+		if (Number.isFinite(record[2])) {
+			record[2] += (frame - record[0]) * record[3];
+			if (Number.isFinite(record[4])) {
+				const length = record[5] - record[4];
+				record[2] = record[4] + ((record[2] - record[4]) % length + length) % length;
+			}
+		}
+		record[0] = frame;
+	};
+	const append = record => {
+		if (count === maxRecords) { head = (head + 1) % maxRecords; count--; }
+		ring.set(record, at(count++));
+		const cutoff = record[1] - maxFrames;
+		while (count && ring[at(0) + 1] <= cutoff) { head = (head + 1) % maxRecords; count--; }
+		if (count && ring[at(0)] < cutoff) clip(ring.subarray(at(0), at(0) + 8), cutoff);
+	};
+	return {
+		get renderedThroughFrame() { return through; },
+		append(observation, silenceStatus = observation.status) {
+			const {renderFrame, renderedThroughFrame, outputSegments, status, ended} = observation;
+			if (through !== null && renderFrame !== through) throw new RangeError('Noncontiguous rendered output');
+			start ??= renderFrame;
+			let cursor = renderFrame;
+			const silence = end => {
+				if (end <= cursor) return;
+				const code = ended && end === renderedThroughFrame && cursor >= (outputSegments.at(-1)?.toFrame ?? renderFrame)
+					? 6 : silenceStatus === 'source-error' ? 5 : silenceStatus === 'underrun' ? 4 : silenceStatus === 'paused' ? 2 : 3;
+				append([cursor, end, NaN, NaN, NaN, NaN, code, code === 6 ? 1 : 0]);
+				cursor = end;
+			};
+			for (const segment of outputSegments) {
+				silence(segment.fromFrame);
+				append([segment.fromFrame, segment.toFrame, segment.sourceFrame, segment.rate,
+					segment.loop?.start ?? NaN, segment.loop?.end ?? NaN, status === 'draining' ? 1 : 0, 0]);
+				cursor = segment.toFrame;
+			}
+			silence(renderedThroughFrame);
+			through = renderedThroughFrame;
+		},
+		read(fromFrame) {
+			if (!Number.isSafeInteger(fromFrame) || fromFrame < 0 || fromFrame > (through ?? 0)) {
+				throw new RangeError('Invalid output history request');
+			}
+			const oldest = count ? ring[at(0)] : null;
+			let first = 0;
+			while (first < count && ring[at(first) + 1] <= fromFrame) first++;
+			const records = new Float64Array(Math.min(count - first, maxReplyRecords) * 8);
+			let copied = 0;
+			for (let index = first; index < count && copied < maxReplyRecords; index++) {
+				const offset = at(index);
+				const record = records.subarray(copied * 8, ++copied * 8);
+				record.set(ring.subarray(offset, offset + 8));
+				if (record[0] < fromFrame) clip(record, fromFrame);
+			}
+			return {fromFrame, generationStartFrame: start, oldestRetainedFrame: oldest, renderedThroughFrame: through,
+				returnedThroughFrame: copied ? records[(copied - 1) * 8 + 1] : start !== null && fromFrame >= start ? fromFrame : null,
+				preGenerationThroughFrame: start !== null && fromFrame < start ? start : null,
+				truncatedBeforeFrame: oldest !== null && oldest > Math.max(fromFrame, start) ? oldest : null,
+				records};
+		}
+	};
+}
+
+function decodeOutputHistory(message) {
+	const integer = value => Number.isSafeInteger(value) && value >= 0;
+	const {fromFrame, generationStartFrame: start, oldestRetainedFrame: oldest,
+		renderedThroughFrame: through, returnedThroughFrame: returned, records} = message || {};
+	let backingBytes, viewBytes, viewOffset;
+	try {
+		const prototype = Object.getPrototypeOf(Float64Array.prototype);
+		const buffer = Object.getOwnPropertyDescriptor(prototype, 'buffer').get.call(records);
+		viewBytes = Object.getOwnPropertyDescriptor(prototype, 'byteLength').get.call(records);
+		viewOffset = Object.getOwnPropertyDescriptor(prototype, 'byteOffset').get.call(records);
+		backingBytes = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(buffer);
+	} catch {
+		throw new RangeError('Invalid output history backing buffer');
+	}
+	if (viewOffset !== 0 || backingBytes !== viewBytes || viewBytes > 256 * 8 * 8 || viewBytes % (8 * 8)) {
+		throw new RangeError('Invalid output history backing buffer');
+	}
+	const length = viewBytes / 8;
+	if (!integer(fromFrame) || !(records instanceof Float64Array)
+		|| (start === null ? fromFrame !== 0 || oldest !== null || through !== null || returned !== null || length
+			: !integer(start) || !integer(oldest) || !integer(through) || oldest < start || oldest >= through
+				|| fromFrame > through || (returned !== null && (!integer(returned) || returned > through || returned < fromFrame)))
+		|| message.preGenerationThroughFrame !== (start !== null && fromFrame < start ? start : null)
+		|| message.truncatedBeforeFrame !== (oldest !== null && oldest > Math.max(fromFrame, start) ? oldest : null)) {
+		throw new RangeError('Invalid output history envelope');
+	}
+	if (start !== null && !length && fromFrame !== through) throw new RangeError('Missing output history coverage');
+	const result = [];
+	let cursor = start === null ? null : Math.max(fromFrame, oldest);
+	for (let offset = 0; offset < length; offset += 8) {
+		const from = records[offset], to = records[offset + 1], position = records[offset + 2], rate = records[offset + 3];
+		const loopStart = records[offset + 4], loopEnd = records[offset + 5], status = records[offset + 6], ended = records[offset + 7];
+		const validSource = status === 0 || status === 1;
+		if (!integer(from) || !integer(to) || from !== cursor || to <= from || to > through
+			|| !Number.isInteger(status) || status < 0 || status > 6 || ended !== (status === 6 ? 1 : 0)
+			|| (validSource ? !Number.isFinite(position) || position < 0 || !Number.isFinite(rate) || rate <= 0 || rate > 4
+				|| !(Number.isNaN(loopStart) && Number.isNaN(loopEnd) || Number.isFinite(loopStart) && loopStart >= 0
+					&& Number.isFinite(loopEnd) && loopEnd > loopStart && position >= loopStart && position < loopEnd)
+				: ![position, rate, loopStart, loopEnd].every(Number.isNaN))) throw new RangeError('Invalid output history record');
+		result.push({fromFrame: from, toFrame: to, sourceFrame: validSource ? position : null, rate: validSource ? rate : null,
+			loop: Number.isNaN(loopStart) ? null : {start: loopStart, end: loopEnd},
+			status: ['playing', 'draining', 'paused', 'preparing', 'underrun', 'source-error', 'ended'][status], ended: Boolean(ended)});
+		cursor = to;
+	}
+	if (returned !== (result.length ? cursor : start !== null && fromFrame >= start ? fromFrame : null)) {
+		throw new RangeError('Invalid output history watermark');
+	}
+	return result;
+}
 // Buffer transport for one immutable source generation. All methods run in the
 // AudioWorklet; the supplied MessagePort belongs to the source-fetching worker.
-function createWindowedTransport(createSource, spec, port) {
+function createWindowedTransport(createSource, spec, port, createHistory) {
+	const history = spec.outputHistory ? createHistory(spec.outputHistory) : null;
 	const source = createSource(spec);
 	spec = source.description;
 	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
 	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
 	let outputObserver = null;
+	let historyObserver = null;
 	const wrap = (position, loop) => loop
 		? loop.start + ((position - loop.start) % (loop.end - loop.start) + loop.end - loop.start) % (loop.end - loop.start)
 		: position;
@@ -219,6 +345,10 @@ function createWindowedTransport(createSource, spec, port) {
 	};
 	const send = (type, data, transfer = []) => port.postMessage({type, generation: spec.generation, ...data}, transfer);
 	const reject = (message, code) => send('rejected', {requestId: message.requestId, code});
+	const validRequestId = value => typeof value === 'string' && value.length > 0 || Number.isSafeInteger(value);
+	const replyHistory = (message, reply = history.read(message.fromFrame)) => {
+		send('output-history', {requestId: message.requestId, ...reply}, [reply.records.buffer]);
+	};
 	const checkedCommand = message => {
 		const command = message.command;
 		if (!command || !Number.isSafeInteger(command.id) || command.id <= lastCommandId
@@ -269,6 +399,20 @@ function createWindowedTransport(createSource, spec, port) {
 				sourceFailed = false;
 				needKey = '';
 				send('retry-accepted', {requestId: message.requestId});
+			} else if (message.type === 'observe-history') {
+				if (!history || !validRequestId(message.requestId)) throw new RangeError('History unavailable or invalid request identity');
+				const reply = history.read(message.fromFrame);
+				if (historyObserver) reject(message, 'observation_pending');
+				else if (message.fromFrame < history.renderedThroughFrame) replyHistory(message, reply);
+				else {
+					historyObserver = {requestId: message.requestId, fromFrame: message.fromFrame};
+					send('history-queued', {requestId: message.requestId});
+				}
+			} else if (message.type === 'cancel-observe-history') {
+				if (!validRequestId(message.requestId) || !historyObserver || historyObserver.requestId !== message.observationRequestId) throw new RangeError('Unknown history observation');
+				reject(historyObserver, 'observation_cancelled');
+				historyObserver = null;
+				send('history-cancelled', {requestId: message.requestId});
 			} else if (message.type === 'observe-output') {
 				if (outputObserver) {
 					reject(message, 'observation_pending');
@@ -295,6 +439,8 @@ function createWindowedTransport(createSource, spec, port) {
 			commands = [];
 			if (outputObserver) reject(outputObserver, 'source_closed');
 			outputObserver = null;
+			if (historyObserver) reject(historyObserver, 'source_closed');
+			historyObserver = null;
 			const released = source.drop(spec.generation, source.starts());
 			send('source-closed', {reason, buffers: released.transfer}, released.transfer);
 			port.close();
@@ -320,6 +466,7 @@ function createWindowedTransport(createSource, spec, port) {
 			const active = state.active && (loop || source.lengthFrames === null || presentedPosition < source.lengthFrames);
 			const missing = active && !drain ? source.read(position + inputLatency - input[0].length, input, loop) : null;
 			let nextStatus = !active ? 'paused' : missing ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
+			const silenceStatus = !active ? 'paused' : missing || drain ? sourceFailed ? 'source-error' : 'underrun' : 'preparing';
 			let validFrom = output[0].length;
 			let validTo = output[0].length;
 			let sourceFrame = null;
@@ -396,6 +543,11 @@ function createWindowedTransport(createSource, spec, port) {
 				active: state.active, status: nextStatus, lengthFrames: source.lengthFrames,
 				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
+			history?.append(observation, silenceStatus);
+			if (historyObserver) {
+				replyHistory(historyObserver);
+				historyObserver = null;
+			}
 			if (outputObserver) {
 				send('output-observation', {...outputObserver, ...observation});
 				outputObserver = null;
@@ -413,7 +565,7 @@ function createWindowedTransport(createSource, spec, port) {
 		}
 	};
 }
-function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport) {
+function registerWorkletProcessor(Module, audioNodeKey, createSource, createTransport, createHistory) {
 	class WasmProcessor extends AudioWorkletProcessor {
 		constructor(options) {
 			super(options);
@@ -451,7 +603,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 						|| spec.capacityFrames < this.bufferLength + 2) {
 						throw new RangeError('Source must match the worklet rate and channels and supply a MessagePort');
 					}
-					const transport = createTransport(createSource, spec, port);
+					const transport = createTransport(createSource, spec, port, createHistory);
 					this.windowedTransport?.close();
 					this.windowedTransport = transport;
 					this.wasmModule._reset();
@@ -804,7 +956,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 SignalsmithStretch = ((Module, audioNodeKey) => {
 	if (typeof AudioWorkletProcessor === "function" && typeof registerProcessor === "function") {
 		// AudioWorklet side
-		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport);
+		registerWorkletProcessor(Module, audioNodeKey, createWindowedSource, createWindowedTransport, createOutputHistory);
 		return {};
 	}
 	let promiseKey = Symbol();
@@ -827,7 +979,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 			if (!audioContext[promiseKey]) {
 				let moduleUrl = createNode.moduleUrl;
 				if (!moduleUrl) {
-					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport})`;
+					let moduleCode = `(${registerWorkletProcessor})((_scriptName=>${Module})(),${JSON.stringify(audioNodeKey)},${createWindowedSource},${createWindowedTransport},${createOutputHistory})`;
 					moduleUrl = URL.createObjectURL(new Blob([moduleCode], {type: 'text/javascript'}));
 				}
 				audioContext[promiseKey] = audioContext.audioWorklet.addModule(moduleUrl);
@@ -888,6 +1040,7 @@ SignalsmithStretch = ((Module, audioNodeKey) => {
 	};
 	return createNode;
 })(SignalsmithStretch, "signalsmith-stretch");
+SignalsmithStretch.decodeOutputHistory = decodeOutputHistory;
 // register as a CommonJS/AMD module
 if (typeof exports === 'object' && typeof module === 'object') {
 	module.exports = SignalsmithStretch;

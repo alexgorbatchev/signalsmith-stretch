@@ -24,6 +24,17 @@ run('npm', ['install', '--ignore-scripts', '--package-lock=false', '--no-audit',
 // ESM namespace or requiring a browser global merely to load the package.
 const invokeCheck = `
 assert.equal(typeof factory, 'function');
+const records = new Float64Array([100, 228, 10.25, 1.5, 10.25, 17.75, 0, 0]);
+const history = {fromFrame: 100, generationStartFrame: 100, oldestRetainedFrame: 100,
+  renderedThroughFrame: 228, returnedThroughFrame: 228, preGenerationThroughFrame: null,
+  truncatedBeforeFrame: null, records};
+const transferred = structuredClone(history, {transfer: [records.buffer]});
+assert.equal(records.byteLength, 0);
+assert.deepEqual(factory.decodeOutputHistory(transferred), [{fromFrame: 100, toFrame: 228,
+  sourceFrame: 10.25, rate: 1.5, loop: {start: 10.25, end: 17.75}, status: 'playing', ended: false}]);
+const oversized = new Float64Array(new ArrayBuffer(1024 * 1024), 0, 8);
+oversized.set(transferred.records);
+assert.throws(() => factory.decodeOutputHistory({...transferred, records: oversized}), RangeError);
 assert.equal(factory.moduleUrl, undefined);
 factory.moduleUrl = 'https://example.org/worklet.js';
 assert.equal(factory.moduleUrl, 'https://example.org/worklet.js');
@@ -37,10 +48,18 @@ run(process.execPath, ['consumer.cjs']);
 const typeConsumer = `
 async function connect(context: AudioContext, port: MessagePort): Promise<SignalsmithStretch.IStretchNode> {
   const node = await SignalsmithStretch(context, {numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1]});
-  const description: SignalsmithStretch.ISourceDescription = {generation: 'track', sampleRate: context.sampleRate, channels: 1, lengthFrames: null, capacityFrames: 48000};
+  const description: SignalsmithStretch.ISourceDescription = {generation: 'track', sampleRate: context.sampleRate, channels: 1, lengthFrames: null, capacityFrames: 48000,
+    outputHistory: {maxFrames: 48000, maxRecords: 4096, maxReplyRecords: 256}};
   const finiteDescription: SignalsmithStretch.ISourceDescription = {...description, lengthFrames: 480000};
   void finiteDescription;
   await node.attachSource(description, port, [port]);
+  const history: SignalsmithStretch.IObserveHistoryMessage = {type: 'observe-history', generation: description.generation, requestId: 'history', fromFrame: 0};
+  const historyRequest: SignalsmithStretch.WorkerMessage = history;
+  port.postMessage(historyRequest);
+  const cancel: SignalsmithStretch.ICancelObserveHistoryMessage = {type: 'cancel-observe-history', generation: description.generation, requestId: 'cancel', observationRequestId: history.requestId};
+  port.postMessage(cancel);
+  // @ts-expect-error history watermark is a numeric rendered frame
+  history.fromFrame = 'future';
   const command: SignalsmithStretch.ICommandMessage = {type: 'command', generation: description.generation, command: {id: 1, atFrame: 128, active: true, rate: 1.5, loop: {start: 100.25, end: 6100.25}}};
   const window: SignalsmithStretch.IWindowMessage = {type: 'window', generation: description.generation, start: 0, channels: [new Float32Array(12000)]};
   port.postMessage(window, window.channels.map(channel => channel.buffer));
@@ -65,6 +84,13 @@ async function connect(context: AudioContext, port: MessagePort): Promise<Signal
   return node;
 }
 function observe(message: SignalsmithStretch.WorkletMessage): number | null {
+  if (message.type === 'output-history') {
+    const records: SignalsmithStretch.IHistorySegment[] = SignalsmithStretch.decodeOutputHistory(message);
+    const source: number | null = records[0]?.sourceFrame ?? null;
+    void source;
+    return message.returnedThroughFrame;
+  }
+  if (message.type === 'history-queued' || message.type === 'history-cancelled') return null;
   if (message.type === 'applied') return message.effectiveOutputFrame;
   if (message.type === 'state') return message.sourceFrame;
   if (message.type === 'need') return message.range.end;

@@ -16,7 +16,7 @@ function openContext() {
 		registerProcessor(_name, value) { Processor = value; }
 	});
 	const load = context => {
-		for (const path of ['emscripten/main.js', 'windowed-source.js', 'windowed-transport.js', 'web-wrapper.js']) {
+		for (const path of ['emscripten/main.js', 'windowed-source.js', 'output-history.js', 'windowed-transport.js', 'web-wrapper.js']) {
 			const url = new URL('../' + path, import.meta.url);
 			runInContext(readFileSync(url, 'utf8'), context, {filename: fileURLToPath(url)});
 		}

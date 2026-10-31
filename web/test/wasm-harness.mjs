@@ -5,6 +5,7 @@ import {MessageChannel} from 'node:worker_threads';
 
 const moduleFactory = runInThisContext(readFileSync(new URL('../emscripten/main.js', import.meta.url), 'utf8') + '\nSignalsmithStretch', {filename: fileURLToPath(new URL("../emscripten/main.js", import.meta.url))});
 const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource', {filename: fileURLToPath(new URL("../windowed-source.js", import.meta.url))});
+const createHistory = runInThisContext(readFileSync(new URL('../output-history.js', import.meta.url), 'utf8') + '\ncreateOutputHistory', {filename: fileURLToPath(new URL('../output-history.js', import.meta.url))});
 const createTransport = runInThisContext(readFileSync(new URL('../windowed-transport.js', import.meta.url), 'utf8') + '\ncreateWindowedTransport', {filename: fileURLToPath(new URL("../windowed-transport.js", import.meta.url))});
 
 export async function openHarness(spec) {
@@ -26,7 +27,7 @@ export async function openHarness(spec) {
 	});
 	let transport;
 	try {
-		transport = createTransport(createSource, spec, port1);
+		transport = createTransport(createSource, spec, port1, createHistory);
 	} catch (error) {
 		port1.close();
 		port2.close();

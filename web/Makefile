@@ -30,9 +30,9 @@ release/WINDOWED-SOURCE.md: WINDOWED-SOURCE.md
 test:
 	node --test test/*.test.mjs
 
-release/SignalsmithStretch.js: emscripten/main.js windowed-source.js windowed-transport.js web-wrapper.js
+release/SignalsmithStretch.js: emscripten/main.js windowed-source.js output-history.js windowed-transport.js web-wrapper.js
 	@ cp emscripten/main.js release/SignalsmithStretch.js
-	@ cat windowed-source.js windowed-transport.js >> release/SignalsmithStretch.js
+	@ cat windowed-source.js output-history.js windowed-transport.js >> release/SignalsmithStretch.js
 	@ cat web-wrapper.js >> release/SignalsmithStretch.js
 
 emscripten/main.js: emscripten/main.cpp ../signalsmith-stretch.h

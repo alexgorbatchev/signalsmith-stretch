@@ -5,6 +5,13 @@ declare function SignalsmithStretch(
 
 declare namespace SignalsmithStretch {
   let moduleUrl: string | undefined;
+  function decodeOutputHistory(message: unknown): IHistorySegment[];
+
+  interface IOutputHistoryOptions {
+    maxFrames: number;
+    maxRecords: number;
+    maxReplyRecords: number;
+  }
 
   interface ISourceDescription {
     readonly generation: string;
@@ -12,6 +19,7 @@ declare namespace SignalsmithStretch {
     readonly channels: number;
     readonly lengthFrames: number | null;
     readonly capacityFrames: number;
+    readonly outputHistory?: IOutputHistoryOptions;
   }
 
   interface ILoop {
@@ -117,7 +125,49 @@ declare namespace SignalsmithStretch {
     type: "observe-output";
   }
 
-  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage | IObserveOutputMessage;
+  interface IObserveHistoryMessage extends IMessageIdentity {
+    type: "observe-history";
+    requestId: string | number;
+    fromFrame: number;
+  }
+
+  interface ICancelObserveHistoryMessage extends IMessageIdentity {
+    type: "cancel-observe-history";
+    requestId: string | number;
+    observationRequestId: string | number;
+  }
+
+  interface IHistorySegment {
+    fromFrame: number;
+    toFrame: number;
+    sourceFrame: number | null;
+    rate: number | null;
+    loop: ILoop | null;
+    status: "playing" | "draining" | "paused" | "preparing" | "underrun" | "source-error" | "ended";
+    ended: boolean;
+  }
+
+  interface IOutputHistoryMessage extends IMessageIdentity {
+    type: "output-history";
+    fromFrame: number;
+    generationStartFrame: number | null;
+    oldestRetainedFrame: number | null;
+    renderedThroughFrame: number | null;
+    returnedThroughFrame: number | null;
+    preGenerationThroughFrame: number | null;
+    truncatedBeforeFrame: number | null;
+    records: Float64Array<ArrayBuffer>;
+  }
+
+  interface IHistoryQueuedMessage extends IMessageIdentity {
+    type: "history-queued";
+  }
+
+  interface IHistoryCancelledMessage extends IMessageIdentity {
+    type: "history-cancelled";
+  }
+
+  type WorkerMessage = IWindowMessage | IEofMessage | IDropMessage | ICommandMessage | IReadFailedMessage | IRetryMessage | IObserveOutputMessage | IObserveHistoryMessage | ICancelObserveHistoryMessage;
 
   interface IOutputSegment {
     fromFrame: number;
@@ -225,5 +275,6 @@ declare namespace SignalsmithStretch {
 
   type WorkletMessage = IStateMessage | IAppliedMessage | INeedMessage | IReadyMessage | IAcceptedMessage
     | IEofAcceptedMessage | IReleasedMessage | IClosedMessage | IQueuedMessage | IRejectedMessage | IFailureMessage
-    | IRetriedMessage | IOutputObservationMessage | IObservationQueuedMessage;
+    | IRetriedMessage | IOutputObservationMessage | IObservationQueuedMessage | IOutputHistoryMessage
+    | IHistoryQueuedMessage | IHistoryCancelledMessage;
 }
