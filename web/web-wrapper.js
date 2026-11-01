@@ -278,7 +278,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 				const input = this.buffersIn.map(pointer => new Float32Array(memory, pointer, this.bufferLength));
 				const rendered = this.windowedTransport.render(currentFrame, outputList[0], input, wasmModule,
 					wasmModule._inputLatency(), wasmModule._outputLatency());
-				if (rendered) {
+				if (rendered && !rendered.skipped) {
 					memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
 					outputList[0].forEach((channel, c) => {
 						channel.set(rendered.samples ? rendered.samples[c] : new Float32Array(memory, this.buffersOut[c], outputBlockSize));
@@ -286,7 +286,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 						channel.fill(0, rendered.validTo);
 					});
 				}
-				this.windowedTransport.mix(rendered?.observation, outputList[0]);
+				if (!rendered?.skipped) this.windowedTransport.mix(rendered?.observation, outputList[0]);
 				return true;
 			}
 			if (!currentMapSegment.active) {

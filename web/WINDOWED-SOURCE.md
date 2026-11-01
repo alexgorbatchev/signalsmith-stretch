@@ -208,6 +208,22 @@ credit with `source_closed`. A suspended context creates no history or fabricate
 progress; its request can remain pending until resume, cancellation or closure.
 Actual browser port delivery during suspension requires platform qualification.
 
+If a host callback repeats or overlaps an already committed native render
+interval, the processor writes zeros for that callback without consuming PCM,
+advancing DSP or metronome state, applying controls, or settling observations.
+The next callback beginning at the exclusive committed boundary proceeds
+normally. This guard also applies when output history is disabled.
+
+A forward native frame gap discards delayed DSP output and metronome tails,
+then prepares again from the last actually presented source boundary. Queued
+controls apply at the new native interval; an explicit seek overrides that
+boundary. Playback settings and outstanding PCM request ownership are retained.
+The gap itself has no source-position or silence record. History discards its
+older retained prefix and exposes only the new contiguous suffix through
+`oldestRetainedFrame` and `truncatedBeforeFrame`; `generationStartFrame` remains
+the first committed frame of the attachment. This recovery uses the host's
+actual frame values and does not synthesize a replacement clock.
+
 An `output-history` reply contains:
 
 - `generationStartFrame`: first actual committed render frame, null before one.

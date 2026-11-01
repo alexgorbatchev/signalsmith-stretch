@@ -30,7 +30,10 @@ function createOutputHistory(options) {
 		get renderedThroughFrame() { return through; },
 		append(observation, silenceStatus = observation.status) {
 			const {renderFrame, renderedThroughFrame, outputSegments, status, ended} = observation;
-			if (through !== null && renderFrame !== through) throw new RangeError('Noncontiguous rendered output');
+			if (through !== null && renderFrame < through) throw new RangeError('Overlapping rendered output');
+			// Retain one truthful contiguous suffix. A native frame gap is not
+			// observed silence; existing truncation metadata exposes its absence.
+			if (through !== null && renderFrame > through) head = count = 0;
 			start ??= renderFrame;
 			let cursor = renderFrame;
 			const silence = end => {

@@ -209,7 +209,10 @@ function createOutputHistory(options) {
 		get renderedThroughFrame() { return through; },
 		append(observation, silenceStatus = observation.status) {
 			const {renderFrame, renderedThroughFrame, outputSegments, status, ended} = observation;
-			if (through !== null && renderFrame !== through) throw new RangeError('Noncontiguous rendered output');
+			if (through !== null && renderFrame < through) throw new RangeError('Overlapping rendered output');
+			// Retain one truthful contiguous suffix. A native frame gap is not
+			// observed silence; existing truncation metadata exposes its absence.
+			if (through !== null && renderFrame > through) head = count = 0;
 			start ??= renderFrame;
 			let cursor = renderFrame;
 			const silence = end => {
@@ -310,6 +313,7 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
 	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
+	let renderedThroughFrame = null;
 	let outputObserver = null;
 	let historyObserver = null;
 	let metronome = null, pendingMetronome = null, click = null, previousOutput = null;
@@ -534,6 +538,22 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 		},
 		render(frame, output, input, wasm, inputLatency, outputLatency) {
 			if (closed) return;
+			// Host frame regressions must not consume source, controls or DSP state
+			// twice. The exclusive frontier is independent of optional history.
+			if (renderedThroughFrame !== null && frame < renderedThroughFrame) {
+				output.forEach(channel => channel.fill(0));
+				return {skipped: true};
+			}
+			if (renderedThroughFrame !== null && frame > renderedThroughFrame) {
+				// A skipped native interval invalidates every delayed output stamp.
+				// Reprime from the last actually presented source boundary, then
+				// apply queued controls normally (an explicit seek may override it).
+				wasm._reset();
+				state.position = presentedPosition;
+				outputTimeline = [];
+				drain = null;
+				click = previousOutput = null;
+			}
 			if (pendingMetronome) {
 				metronome = pendingMetronome;
 				pendingMetronome = click = previousOutput = null;
@@ -637,6 +657,7 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
 			history?.append(observation, silenceStatus);
+			renderedThroughFrame = observation.renderedThroughFrame;
 			if (historyObserver) {
 				replyHistory(historyObserver);
 				historyObserver = null;
@@ -938,7 +959,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 				const input = this.buffersIn.map(pointer => new Float32Array(memory, pointer, this.bufferLength));
 				const rendered = this.windowedTransport.render(currentFrame, outputList[0], input, wasmModule,
 					wasmModule._inputLatency(), wasmModule._outputLatency());
-				if (rendered) {
+				if (rendered && !rendered.skipped) {
 					memory = wasmModule.exports ? wasmModule.exports.memory.buffer : wasmModule.HEAP8.buffer;
 					outputList[0].forEach((channel, c) => {
 						channel.set(rendered.samples ? rendered.samples[c] : new Float32Array(memory, this.buffersOut[c], outputBlockSize));
@@ -946,7 +967,7 @@ function registerWorkletProcessor(Module, audioNodeKey, createSource, createTran
 						channel.fill(0, rendered.validTo);
 					});
 				}
-				this.windowedTransport.mix(rendered?.observation, outputList[0]);
+				if (!rendered?.skipped) this.windowedTransport.mix(rendered?.observation, outputList[0]);
 				return true;
 			}
 			if (!currentMapSegment.active) {

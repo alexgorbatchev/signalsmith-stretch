@@ -7,6 +7,7 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 	let state = {position: 0, rate: 1, semitones: 0, active: false, loop: null};
 	let commands = [], lastCommandId = -1, status = 'paused', needKey = '', closed = false, lastObservation = -Infinity;
 	let outputTimeline = [], presentedPosition = 0, sourceFailed = false, drain = null;
+	let renderedThroughFrame = null;
 	let outputObserver = null;
 	let historyObserver = null;
 	let metronome = null, pendingMetronome = null, click = null, previousOutput = null;
@@ -231,6 +232,22 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 		},
 		render(frame, output, input, wasm, inputLatency, outputLatency) {
 			if (closed) return;
+			// Host frame regressions must not consume source, controls or DSP state
+			// twice. The exclusive frontier is independent of optional history.
+			if (renderedThroughFrame !== null && frame < renderedThroughFrame) {
+				output.forEach(channel => channel.fill(0));
+				return {skipped: true};
+			}
+			if (renderedThroughFrame !== null && frame > renderedThroughFrame) {
+				// A skipped native interval invalidates every delayed output stamp.
+				// Reprime from the last actually presented source boundary, then
+				// apply queued controls normally (an explicit seek may override it).
+				wasm._reset();
+				state.position = presentedPosition;
+				outputTimeline = [];
+				drain = null;
+				click = previousOutput = null;
+			}
 			if (pendingMetronome) {
 				metronome = pendingMetronome;
 				pendingMetronome = click = previousOutput = null;
@@ -334,6 +351,7 @@ function createWindowedTransport(createSource, spec, port, createHistory) {
 				ended: Boolean(state.active && !loop && source.lengthFrames !== null && presentedPosition >= source.lengthFrames),
 				inputLatencyFrames: inputLatency, outputLatencyFrames: outputLatency};
 			history?.append(observation, silenceStatus);
+			renderedThroughFrame = observation.renderedThroughFrame;
 			if (historyObserver) {
 				replyHistory(historyObserver);
 				historyObserver = null;

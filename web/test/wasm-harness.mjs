@@ -47,17 +47,17 @@ export async function openHarness(spec) {
 			if (result.type === "rejected") throw new Error(result.code);
 			return result;
 		},
-		render() {
-			const output = Array.from({length: spec.channels}, () => new Float32Array(128));
-			const rendered = transport.render(frame, output, input, wasm, wasm._inputLatency(), wasm._outputLatency());
+		render(renderFrame = frame, frames = 128, initialValue = 0) {
+			const output = Array.from({length: spec.channels}, () => new Float32Array(frames).fill(initialValue));
+			const rendered = transport.render(renderFrame, output, input, wasm, wasm._inputLatency(), wasm._outputLatency());
 			lastRender = rendered;
-			if (rendered) output.forEach((channel, index) => {
-				channel.set(rendered.samples ? rendered.samples[index] : new Float32Array(memory(), pointer + history * (index + spec.channels) * 4, 128));
+			if (rendered && !rendered.skipped) output.forEach((channel, index) => {
+				channel.set(rendered.samples ? rendered.samples[index] : new Float32Array(memory(), pointer + history * (index + spec.channels) * 4, frames));
 				channel.fill(0, 0, rendered.validFrom);
 				channel.fill(0, rendered.validTo);
 			});
-			transport.mix(rendered?.observation, output);
-			frame += 128;
+			if (!rendered?.skipped) transport.mix(rendered?.observation, output);
+			frame = renderFrame + frames;
 			return output;
 		},
 		async flush() {
