@@ -1,12 +1,20 @@
 ---
 created_on: 2026-10-30 20:07
-last_modified: 2026-10-30 20:07
+last_modified: 2026-10-31 20:09
 status: current
 ---
 
 # Package and release instructions
 
 Publish `@alexgorbatchev/signalsmith-stretch` from the repository root. The root `package.json` owns the version, exports, and package allowlist; `web/release` contains generated artifacts, not a separate npm package.
+
+## Version policy
+
+- Match the major and minor numbers of the adopted upstream web/DSP baseline recorded in `UPSTREAM.md`. Do not adopt a newer upstream version number without integrating and qualifying that baseline.
+- Increment the fork's patch number for each stable release within that major/minor line, independently of upstream patch numbers. For example, `1.3.3` is followed by `1.3.4`; adopting upstream `1.4` starts the `1.4.0` line. Never reuse a published version.
+- Use prerelease suffixes only for explicitly designated prereleases. Publish stable releases to `latest` and prereleases to `next`.
+- Describe this as upstream-tracking versioning, not strict Semantic Versioning for the fork API. Document API changes in release notes and recommend exact version pins for controlled upgrades.
+- Keep the README's primary install command on the stable channel. State when initial publication is still required; use `@next` only for optional prerelease installation.
 
 ## Required checks
 
@@ -30,7 +38,7 @@ The build deliberately reuses checked-in WASM. Read [UPSTREAM.md](UPSTREAM.md) b
 
 ## Publish through GitHub
 
-1. Choose an unused version and run `npm version <version> --no-git-tag-version`. Commit both `package.json` and `package-lock.json`. Keep the README installation tag aligned with the available stable/prerelease channel.
+1. Choose an unused version under the version policy above and run `npm version <version> --no-git-tag-version`. Commit both `package.json` and `package-lock.json`. Verify npm availability before describing a version or channel as installable in the README.
 2. Run the required checks above. Optionally verify local lifecycle behavior with `npm publish --dry-run --tag next` for a prerelease, or `--tag latest` for a stable version. A dry-run does not verify publishing credentials.
 3. Push the verified release commit to the established remote and confirm its GitHub checks pass. The commit must include [.github/workflows/release.yml](.github/workflows/release.yml).
 4. Publish a GitHub Release whose tag is exactly `v<package.json version>` and points at the verified commit. Mark it as a prerelease if and only if the version has a prerelease suffix. A draft release or tag push alone does not publish to npm.

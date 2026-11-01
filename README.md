@@ -27,11 +27,13 @@
 
 # Installation
 
+The scoped package must have a stable release published to npm before this command is available:
+
 ```sh
-npm install @alexgorbatchev/signalsmith-stretch@next
+npm install @alexgorbatchev/signalsmith-stretch
 ```
 
-Prereleases use the `next` npm tag; stable releases use `latest`.
+Stable releases use the `latest` npm tag, which npm installs by default. Use `@next` only to opt into an explicitly published prerelease.
 
 # Quick Start
 
@@ -91,6 +93,12 @@ See the [Web Audio API reference](web/API.md) for scheduling and buffer operatio
 # Upstream
 
 The embedded DSP comes from Signalsmith Stretch 1.3.2; see [upstream provenance](UPSTREAM.md) for the exact boundary and validation limitations. The [C++ API guide](https://github.com/alexgorbatchev/signalsmith-stretch/blob/HEAD/CPP.md) covers native use. Development and release instructions are in [CONTRIBUTING.md](https://github.com/alexgorbatchev/signalsmith-stretch/blob/HEAD/CONTRIBUTING.md).
+
+# Versioning
+
+Versions track the adopted upstream web/DSP baseline's major and minor numbers. The patch number advances independently for fork releases: for example, `1.3.3`, `1.3.4`, and `1.3.5` all belong to the upstream `1.3` line. The exact upstream version and commit are recorded in [UPSTREAM.md](UPSTREAM.md); the fork patch number does not identify an upstream patch.
+
+This scheme identifies upstream lineage and fork releases; it does not encode the compatibility of fork API changes as strict Semantic Versioning would. Pin dependencies to an exact version and review release notes before upgrading.
 
 # License
 

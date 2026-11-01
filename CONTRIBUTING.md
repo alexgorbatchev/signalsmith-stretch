@@ -10,7 +10,7 @@ Use Node.js 22 or newer, npm, and GNU Make. The checked-in WASM payload is reuse
 
 `npm pack` builds automatically through `prepack`. Local `npm publish` also runs the behavioral and installed-package checks through `prepublishOnly`. The package's explicit file allowlist excludes development sources and dependencies.
 
-Coverage uses pinned c8 with V8 execution data on Node.js 22.12 or newer. It includes every first-party JavaScript source directly in `web/` (`windowed-source.js`, `windowed-transport.js`, and `web-wrapper.js`), including unexecuted files, and requires at least 90% lines and functions for each file. Embedded upstream WASM/glue, generated release copies, tests, and `scripts/` are outside this source scope. Native VM harnesses retain source filenames so their actual execution is attributed to the owning files. Reports are written to `.tmp/coverage/`. Tests provide host registration boundaries and real MessagePorts while executing the actual wrapper and embedded WASM; these are native Node proofs, not browser/device-timing qualification. CI and local publication run the same gate.
+Coverage uses pinned c8 with V8 execution data on Node.js 22.12 or newer. It includes every first-party JavaScript source directly in `web/` (`output-history.js`, `windowed-source.js`, `windowed-transport.js`, and `web-wrapper.js`), including unexecuted files, and requires at least 90% lines and functions for each file. Embedded upstream WASM/glue, generated release copies, tests, and `scripts/` are outside this source scope. Native VM harnesses retain source filenames so their actual execution is attributed to the owning files. Reports are written to `.tmp/coverage/`. Tests provide host registration boundaries and real MessagePorts while executing the actual wrapper and embedded WASM; these are native Node proofs, not browser/device-timing qualification. CI and local publication run the same gate.
 
 See [UPSTREAM.md](UPSTREAM.md) before recompiling the embedded WASM. The native C++ API is documented in [CPP.md](CPP.md).
 
@@ -25,9 +25,15 @@ The package is `@alexgorbatchev/signalsmith-stretch`. Publishing requires owners
 
 The workflow uses Node.js 24 and npm's OIDC authentication. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) for requirements and configuration troubleshooting.
 
+# Version policy
+
+The package tracks the major and minor numbers of the adopted upstream web/DSP baseline in `UPSTREAM.md`. The fork owns the patch sequence independently of upstream patch releases: stable releases on the `1.3` baseline progress through `1.3.3`, `1.3.4`, and so on. Adopting and qualifying an upstream `1.4` baseline starts the `1.4.0` line. An upstream tag alone does not change the embedded engine's provenance.
+
+Use a prerelease suffix only for an explicitly designated prerelease. Stable versions publish to `latest`; prereleases publish to `next`. This upstream-tracking scheme does not encode fork API compatibility as strict Semantic Versioning would. Document API changes in release notes so consumers can review upgrades from their pinned version.
+
 # Release from GitHub
 
-1. Change the root version with `npm version <version> --no-git-tag-version`, using an explicit unused version such as `1.3.3-dev.3`. This updates both manifest and lockfile. Keep the README installation tag aligned with whether the package has a stable release.
+1. Change the root version with `npm version <version> --no-git-tag-version`, using an explicit unused version under the policy above, such as `1.3.3` for the first stable fork release. This updates both manifest and lockfile. Keep the README's primary install command on the stable channel, and verify npm availability before describing a version or channel as installable.
 2. Run the development checks above, commit the manifest, lockfile, and generated artifacts, and push the release commit after the repository's required checks pass.
 3. Create and publish a GitHub Release with tag `v<version>` pointing at that commit. Mark versions containing a prerelease suffix as a GitHub prerelease. The tagged commit must contain `.github/workflows/release.yml`.
 4. Inspect the `Publish npm package` workflow. It rejects version/tag or prerelease mismatches, builds and tests the package, checks generated artifacts, and publishes stable versions to `latest` and prereleases to `next`.
