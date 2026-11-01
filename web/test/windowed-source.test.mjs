@@ -7,6 +7,39 @@ import {test} from 'node:test';
 const createSource = runInThisContext(readFileSync(new URL('../windowed-source.js', import.meta.url), 'utf8') + '\ncreateWindowedSource', {filename: fileURLToPath(new URL("../windowed-source.js", import.meta.url))});
 const spec = {generation: 'track-1', sampleRate: 48000, channels: 1, lengthFrames: 48000 * 3600 * 12, capacityFrames: 32};
 
+test('invalid source dimensions and identity are rejected before admitting PCM', () => {
+	for (const overrides of [{generation: ''}, {lengthFrames: 0}, {capacityFrames: 0},
+		{channels: 0}, {channels: 33}, {sampleRate: NaN}]) {
+		assert.throws(() => createSource({...spec, ...overrides}), /Invalid source specification/);
+	}
+});
+
+test('negative analysis preroll is silent and prefetch begins at the first missing source frame', () => {
+	const source = createSource(spec);
+	assert.deepEqual(source.missing(-4, 8), {start: 0, end: 16});
+	source.add('track-1', 0, [Float32Array.from([1, 2, 3, 4])]);
+	assert.equal(source.missing(-4, 8), null);
+	const output = [new Float32Array(8).fill(99)];
+	assert.equal(source.read(-4, output), null);
+	assert.deepEqual(Array.from(output[0]), [0, 0, 0, 0, 1, 2, 3, 4]);
+});
+
+test('invalid release and analysis requests preserve admitted audio and buffer ownership', () => {
+	const source = createSource(spec);
+	const pcm = Float32Array.from([1, 2, 3, 4]);
+	source.add('track-1', 0, [pcm]);
+	assert.throws(() => source.drop('old-track', [0]), /Stale/);
+	assert.throws(() => source.drop('track-1', [-1]), /Invalid window release/);
+	assert.throws(() => source.read(NaN, [new Float32Array(4)]), /Invalid analysis range/);
+	assert.throws(() => source.read(0, [], null), /Invalid analysis range/);
+	assert.throws(() => source.read(0, [new Float32Array(4)], {start: 2, end: 1}), /Invalid analysis range/);
+	const output = [new Float32Array(4)];
+	assert.equal(source.read(0, output), null);
+	assert.deepEqual(Array.from(output[0]), [1, 2, 3, 4]);
+	assert.equal(source.residentFrames, 4);
+	assert.deepEqual(source.drop('track-1', [0]).transfer, [pcm.buffer]);
+});
+
 test('unknown end remains missing until an atomic final PCM window establishes exact EOF', () => {
 	const source = createSource({...spec, lengthFrames: null});
 	source.add('track-1', 0, [Float32Array.from([1, 2])]);

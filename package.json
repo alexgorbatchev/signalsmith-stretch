@@ -52,10 +52,10 @@
     "test:package": "node scripts/testPackage.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build && npm test && npm run test:coverage && npm run test:package",
-    "test:coverage": "c8 --all --include=web/*.js --reporter=text --reporter=json-summary --reports-dir=.tmp/coverage --check-coverage --per-file --lines=90 --functions=90 node --test web/test/*.test.mjs"
+    "test:coverage": "mcr --config scripts/coverage.config.mjs test web/test/*.test.mjs"
   },
   "devDependencies": {
-    "c8": "12.0.0",
+    "monocart-coverage-reports": "3.2.0",
     "typescript": "6.0.3"
   }
 }

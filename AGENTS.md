@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-30 20:07
-last_modified: 2026-10-31 20:09
+last_modified: 2026-11-01 15:10
 status: current
 ---
 
@@ -18,13 +18,14 @@ Publish `@alexgorbatchev/signalsmith-stretch` from the repository root. The root
 
 ## Required checks
 
-Use Node.js 22 or newer, npm, and GNU Make. Run from the repository root:
+Use Node.js 22.15 or newer, npm, and GNU Make. Run from the repository root:
 
 1. `npm ci --ignore-scripts --registry=https://registry.npmjs.org`
 2. `npm run build`
 3. `npm test`
-4. `npm run test:package`
-5. Commit source and generated changes together, then run `git diff --exit-code -- web/release` to confirm no generated changes remain.
+4. `npm run test:coverage`
+5. `npm run test:package`
+6. Commit source and generated changes together, then run `git diff --exit-code -- web/release` to confirm no generated changes remain.
 
 The build deliberately reuses checked-in WASM. Read [UPSTREAM.md](UPSTREAM.md) before changing the DSP or recompiling it. Package tests install a real tarball, check ESM/CommonJS factories, and compile both declaration formats. `npm pack` runs the build through `prepack`; local `npm publish` runs the checks through `prepublishOnly`.
 

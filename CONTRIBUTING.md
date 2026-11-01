@@ -1,6 +1,6 @@
 # Development
 
-Use Node.js 22 or newer, npm, and GNU Make. The checked-in WASM payload is reused for wrapper builds; consumers do not need Make or Emscripten.
+Use Node.js 22.15 or newer, npm, and GNU Make. The checked-in WASM payload is reused for wrapper builds; consumers do not need Make or Emscripten.
 
 1. Run `npm ci --ignore-scripts --registry=https://registry.npmjs.org`.
 2. Run `npm run build` to regenerate the ESM, CommonJS, standalone browser, and declaration artifacts in `web/release`.
@@ -10,7 +10,7 @@ Use Node.js 22 or newer, npm, and GNU Make. The checked-in WASM payload is reuse
 
 `npm pack` builds automatically through `prepack`. Local `npm publish` also runs the behavioral and installed-package checks through `prepublishOnly`. The package's explicit file allowlist excludes development sources and dependencies.
 
-Coverage uses pinned c8 with V8 execution data on Node.js 22.12 or newer. It includes every first-party JavaScript source directly in `web/` (`output-history.js`, `windowed-source.js`, `windowed-transport.js`, and `web-wrapper.js`), including unexecuted files, and requires at least 90% lines and functions for each file. Embedded upstream WASM/glue, generated release copies, tests, and `scripts/` are outside this source scope. Native VM harnesses retain source filenames so their actual execution is attributed to the owning files. Reports are written to `.tmp/coverage/`. Tests provide host registration boundaries and real MessagePorts while executing the actual wrapper and embedded WASM; these are native Node proofs, not browser/device-timing qualification. CI and local publication run the same gate.
+Coverage uses pinned Monocart Coverage Reports with native V8 execution data. The configuration in `scripts/coverage.config.mjs` discovers every first-party JavaScript source directly in `web/` (`output-history.js`, `windowed-source.js`, `windowed-transport.js`, and `web-wrapper.js`), includes unexecuted files, and requires at least 90% lines and functions for each file. Embedded upstream WASM/glue, generated release copies, tests, and `scripts/` are outside this source scope. Native VM harnesses retain source filenames so their actual execution is attributed to the owning files. Reports are written to `.tmp/coverage/`. Gate tests invoke the actual coverage command against isolated sources to verify both metrics, unexecuted files, stale-report rejection, and child-test failure propagation. Tests provide host registration boundaries and real MessagePorts while executing the actual wrapper and embedded WASM; these are native Node proofs, not browser/device-timing qualification. CI and local publication run the same gate.
 
 See [UPSTREAM.md](UPSTREAM.md) before recompiling the embedded WASM. The native C++ API is documented in [CPP.md](CPP.md).
 

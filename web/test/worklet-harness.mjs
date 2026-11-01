@@ -6,7 +6,7 @@ import {MessageChannel, MessagePort} from 'node:worker_threads';
 
 // Host only the AudioWorklet class/registration API. DSP, ports, and RPC dispatch
 // are the real published wrapper and embedded WASM, not substitute algorithms.
-export async function openProcessor() {
+export async function openProcessor({beforeReady} = {}) {
 	const {port1, port2} = new MessageChannel();
 	let Processor;
 	const context = createContext({
@@ -20,6 +20,7 @@ export async function openProcessor() {
 	}
 	const ready = new Promise(resolve => port2.once('message', resolve));
 	const processor = new Processor({numberOfOutputs: 1, outputChannelCount: [1]});
+	beforeReady?.(processor);
 	assert.equal((await ready)[0], 'ready');
 	let id = 0;
 	return {

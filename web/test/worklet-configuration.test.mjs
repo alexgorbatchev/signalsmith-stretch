@@ -3,6 +3,21 @@ import {test} from 'node:test';
 import {MessageChannel} from 'node:worker_threads';
 import {openProcessor} from './worklet-harness.mjs';
 
+test('initial render quanta are silent while WASM initializes and the processor remains live', async () => {
+	const output = [[new Float32Array(128).fill(1), new Float32Array(128).fill(-1)]];
+	let keptAlive;
+	const host = await openProcessor({beforeReady(processor) {
+		keptAlive = processor.process([], output);
+	}});
+	try {
+		assert.equal(keptAlive, true);
+		for (const channel of output[0]) assert.ok(channel.every(value => value === 0));
+		assert.ok(await host.call('latency') > 0);
+	} finally {
+		host.close();
+	}
+});
+
 test('zero-input source nodes remain silent before attach, while paused, and after detach', async () => {
 	const host = await openProcessor();
 	const {port1, port2} = new MessageChannel();
