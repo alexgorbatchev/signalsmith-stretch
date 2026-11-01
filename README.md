@@ -27,8 +27,6 @@
 
 # Installation
 
-The scoped package must have a stable release published to npm before this command is available:
-
 ```sh
 npm install @alexgorbatchev/signalsmith-stretch
 ```
